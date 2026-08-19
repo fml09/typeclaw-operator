@@ -1,0 +1,9 @@
+# Agent tooling (local only, never commit)
+.agents/
+.claude/
+.codex/
+.cocoindex_code/
+.mcp.json
+
+# Vendored reference repositories
+.references/
