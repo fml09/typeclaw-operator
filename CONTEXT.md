@@ -47,3 +47,35 @@ _Avoid_: Sandbox Pod, shared worker
 **Authorized Workspace View**:
 A revisioned, explicitly bounded view of Agent Folder state made available to a remote Tool Execution Environment. Changes return as a validated delta rather than through a live Agent Folder mount.
 _Avoid_: Agent Folder mount, shared workspace
+
+**Platform Extension**:
+An administrator-owned immutable extension that adds trusted tools, skills, helpers, schemas, or credential-use declarations to a TypeClaw Instance.
+_Avoid_: System plugin, agent plugin
+
+**Platform Bundle**:
+A signed, digest-pinned OCI artifact that distributes one or more Platform Extensions and their executable or declarative assets.
+_Avoid_: Plugin package, mutable extension
+
+**Credential Consumer**:
+An administrator-declared policy and audit classification for one bounded use of a credential. It does not identify or isolate an in-process plugin.
+_Avoid_: Credential principal, secret owner
+
+**Credential Runner**:
+A one-invocation Restricted Workload that executes an approved Credential Consumer with only its granted credential, Authorized Workspace View, resources, and Network Authority.
+_Avoid_: Secret Pod, credential proxy
+
+**Opaque Credential Use**:
+A credential use in which model-controlled code receives only a typed result or opaque handle and never receives the credential bytes.
+_Avoid_: Hidden environment variable
+
+**Raw Credential Disclosure**:
+An explicit delegation of credential bytes to model-controlled code. It carries no claim that the recipient cannot read, transform, print, or exfiltrate those bytes.
+_Avoid_: Safe secret injection
+
+**Network Authority**:
+The externally enforced destination policy granted to a runtime or Tool Execution Environment. It is unavailable when the selected enforcement adapter cannot represent the declared policy exactly.
+_Avoid_: Best-effort egress filter, NetworkPolicy alone
+
+**PublicWeb**:
+The destination universe for ordinary web access: public DNS names and globally routable Internet addresses after excluding private, special-use, cluster, node, metadata, and control-plane destinations.
+_Avoid_: Internet, unrestricted egress
