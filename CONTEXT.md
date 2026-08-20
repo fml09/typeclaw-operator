@@ -61,7 +61,7 @@ An administrator-declared policy and audit classification for one bounded use of
 _Avoid_: Credential principal, secret owner
 
 **Credential Runner**:
-A one-invocation Restricted Workload that executes an approved Credential Consumer with only its granted credential, workspace view, resources, and network authority.
+A one-invocation Restricted Workload that executes an approved Credential Consumer with only its granted credential, Authorized Workspace View, resources, and Network Authority.
 _Avoid_: Secret Pod, credential proxy
 
 **Opaque Credential Use**:
@@ -75,3 +75,7 @@ _Avoid_: Safe secret injection
 **Network Authority**:
 The externally enforced destination policy granted to a runtime or Tool Execution Environment. It is unavailable when the selected enforcement adapter cannot represent the declared policy exactly.
 _Avoid_: Best-effort egress filter, NetworkPolicy alone
+
+**PublicWeb**:
+The destination universe for ordinary web access: public DNS names and globally routable Internet addresses after excluding private, special-use, cluster, node, metadata, and control-plane destinations.
+_Avoid_: Internet, unrestricted egress

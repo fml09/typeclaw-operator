@@ -121,11 +121,11 @@ Prototype evidence is still required for:
 - backup quiescing, secret exclusion, empty-target restore, and version-skewed Agent Folder import;
 - SelfConfig submission, SSA conflict handling, and restart-required mutations.
 
-Human decisions remain for:
+At the time this baseline was captured, human decisions remained for:
 
 - CRD granularity, public field set, defaulting precedence, and raw pod escape hatches;
 - the Agent Folder/Secret/external-key storage boundary and backup retention policy;
-- security baseline and whether any opt-in weaker sandbox mode is acceptable;
+- the Restricted Workload floor and whether any Runtime Isolation or Tool Execution Environment may weaken it; this was later resolved by [ADR 0001](../adr/0001-restricted-workload-and-tool-execution-boundaries.md) and [Issue #5](https://github.com/fml09/typeclaw-operator/issues/5);
 - suspend, rollout, deletion/final-backup, and single-active availability semantics;
 - default exposure, outbound network policy, Tailscale/Gateway API scope, and channel-specific egress;
 - SelfConfig allowlists, protected paths, force-ownership policy, and GitOps authority;
