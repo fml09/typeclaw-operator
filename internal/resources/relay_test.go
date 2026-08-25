@@ -84,10 +84,10 @@ func TestRelayRBACScopedToOwnPod(t *testing.T) {
 	if role.Namespace != in.Namespace {
 		t.Fatalf("Role namespace = %q, want namespaced to the Instance", role.Namespace)
 	}
-	if len(role.Rules) != 2 {
-		t.Fatalf("rules = %d, want pod rule plus own-instance status rule", len(role.Rules))
+	if len(role.Rules) != 3 {
+		t.Fatalf("rules = %d, want pod, instance-get, and status rules", len(role.Rules))
 	}
-	statusRule := role.Rules[1]
+	statusRule := role.Rules[2]
 	if statusRule.APIGroups[0] != "typeclaw.fml09.io" ||
 		statusRule.Resources[0] != "typeclawinstances/status" ||
 		statusRule.ResourceNames[0] != in.Name {

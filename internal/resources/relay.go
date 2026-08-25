@@ -123,6 +123,12 @@ func RelayRole(instance *typeclawv1alpha1.TypeClawInstance) *rbacv1.Role {
 			},
 			{
 				APIGroups:     []string{typeclawv1alpha1.GroupVersion.Group},
+				Resources:     []string{"typeclawinstances"},
+				ResourceNames: []string{instance.Name},
+				Verbs:         []string{"get"},
+			},
+			{
+				APIGroups:     []string{typeclawv1alpha1.GroupVersion.Group},
 				Resources:     []string{"typeclawinstances/status"},
 				ResourceNames: []string{instance.Name},
 				Verbs:         []string{"get", "patch"},
