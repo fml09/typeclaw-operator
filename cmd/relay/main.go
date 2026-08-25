@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
 	"github.com/fml09/typeclaw-operator/internal/relay"
 	"github.com/fml09/typeclaw-operator/internal/resources"
 )
@@ -60,6 +61,27 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// clientConfigObserver persists config observations into the Instance's
+// selfConfig status block via a merge patch scoped to that field only, and
+// mirrors them into the watcher's snapshot so revision counting advances.
+type clientConfigObserver struct{ c client.Client }
+
+func (o clientConfigObserver) Observe(
+	ctx context.Context,
+	in *typeclawv1alpha1.TypeClawInstance,
+	obs relay.ConfigObservation,
+) error {
+	base := in.DeepCopy()
+	in.Status.SelfConfig = &typeclawv1alpha1.SelfConfigStatus{
+		ObservedDigest:     obs.Digest,
+		ObservedAt:         &metav1.Time{Time: obs.At},
+		Revision:           obs.Revision,
+		ChangedPaths:       obs.ChangedPaths,
+		ProtectedViolation: obs.ProtectedViolation,
+	}
+	return o.c.Status().Patch(ctx, in, client.MergeFrom(base))
 }
 
 func intervalFromEnv(raw string) (time.Duration, error) {
@@ -118,19 +140,47 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return err
 	}
 
-	w := &relay.Watcher{
-		ControlDir: controlDir,
-		RuntimeID:  runtimeID,
-		PodName:    podName,
-		Namespace:  namespace,
-		Interval:   interval,
-		Deleter:    clientPodDeleter{c},
-		Log:        log,
+	instance := &typeclawv1alpha1.TypeClawInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: strings.TrimSuffix(podName, "-0"), Namespace: namespace},
 	}
-	log.Info("restart relay watching",
-		"controlDir", controlDir, "runtimeId", runtimeID,
-		"pod", namespace+"/"+podName, "interval", interval)
-	return w.Run(ctx)
+	// Fetch the live spec so the watcher evaluates protected paths against
+	// the current policy, not a stale env snapshot.
+	if err := c.Get(ctx, client.ObjectKeyFromObject(instance), instance); err != nil {
+		return err
+	}
+
+	errCh := make(chan error, 2)
+	go func() {
+		w := &relay.Watcher{
+			ControlDir: controlDir,
+			RuntimeID:  runtimeID,
+			PodName:    podName,
+			Namespace:  namespace,
+			Interval:   interval,
+			Deleter:    clientPodDeleter{c},
+			Log:        log,
+		}
+		log.Info("restart relay watching",
+			"controlDir", controlDir, "runtimeId", runtimeID,
+			"pod", namespace+"/"+podName, "interval", interval)
+		errCh <- w.Run(ctx)
+	}()
+
+	if instance.Spec.SelfConfig != nil {
+		go func() {
+			cw := &relay.ConfigWatcher{
+				Instance: instance,
+				AgentDir: resources.AgentMountPath,
+				Interval: interval,
+				Observer: clientConfigObserver{c},
+				Log:      log,
+			}
+			log.Info("selfconfig observation watching", "agentDir", resources.AgentMountPath)
+			errCh <- cw.Run(ctx)
+		}()
+	}
+
+	return <-errCh
 }
 
 func main() {

@@ -226,3 +226,59 @@ func TestRuntimeReadyTracksStatefulSetReadiness(t *testing.T) {
 		t.Fatalf("RuntimeReady must follow StatefulSet readiness, got %+v", rc)
 	}
 }
+
+func TestSelfConfigConditionProjection(t *testing.T) {
+	tests := []struct {
+		name       string
+		specPolicy bool
+		violation  bool
+		wantNil    bool
+		wantStatus metav1.ConditionStatus
+		wantReason string
+	}{
+		{name: "no policy means no condition", wantNil: true},
+		{
+			name:       "policy with clean observation is compliant",
+			specPolicy: true,
+			wantStatus: metav1.ConditionTrue, wantReason: reasonSelfConfigCompliant,
+		},
+		{
+			name:       "protected violation is non-compliant",
+			specPolicy: true, violation: true,
+			wantStatus: metav1.ConditionFalse, wantReason: reasonSelfConfigProtected,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := instance("selfcfg", nil)
+			if tt.specPolicy {
+				in.Spec.SelfConfig = &typeclawv1alpha1.SelfConfigSpec{ProtectedPaths: []string{"sandbox"}}
+				in.Status.SelfConfig = &typeclawv1alpha1.SelfConfigStatus{
+					ProtectedViolation: tt.violation,
+					Revision:           2,
+				}
+			}
+			r, c := reconcilerFor(t, in)
+			key := types.NamespacedName{Namespace: in.Namespace, Name: in.Name}
+			reconcile(t, r, key)
+
+			var got typeclawv1alpha1.TypeClawInstance
+			if err := c.Get(context.Background(), key, &got); err != nil {
+				t.Fatalf("instance read-back: %v", err)
+			}
+			sc := condition(&got.Status, ConditionSelfConfigCompliant)
+			if tt.wantNil {
+				if sc != nil {
+					t.Fatalf("condition must be absent without policy, got %+v", sc)
+				}
+				return
+			}
+			if sc == nil || sc.Status != tt.wantStatus || sc.Reason != tt.wantReason {
+				t.Fatalf("SelfConfigCompliant = %+v, want %s/%s", sc, tt.wantStatus, tt.wantReason)
+			}
+			if sc.ObservedGeneration != got.Generation {
+				t.Errorf("condition generation %d != instance generation %d", sc.ObservedGeneration, got.Generation)
+			}
+		})
+	}
+}

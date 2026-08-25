@@ -32,6 +32,12 @@ const (
 	reasonRuntimeAvailable  = "RuntimeAvailable"
 	reasonRuntimeNotReady   = "RuntimeNotReady"
 	reasonInstanceSuspended = "Suspended"
+
+	// ConditionSelfConfigCompliant projects the relay's protected-path
+	// evaluation of agent-authored config (ADR 0005).
+	ConditionSelfConfigCompliant = "SelfConfigCompliant"
+	reasonSelfConfigCompliant    = "Compliant"
+	reasonSelfConfigProtected    = "ProtectedPathChanged"
 )
 
 // TypeClawInstanceReconciler reconciles a TypeClawInstance object.
@@ -154,6 +160,19 @@ func (r *TypeClawInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			"managed runtime has not reported ready replicas")
 	}
 
+	// ADR 0005: the relay owns status.selfConfig; this projection is the
+	// only place its violation flag becomes a condition.
+	if instance.Spec.SelfConfig != nil {
+		violation := status.SelfConfig != nil && status.SelfConfig.ProtectedViolation
+		msg := "agent config observations are within protected-path policy"
+		reasonTrue, reasonFalse := reasonSelfConfigCompliant, reasonSelfConfigProtected
+		if violation {
+			msg = fmt.Sprintf("agent changed protected typeclaw.json keys %v",
+				status.SelfConfig.ChangedPaths)
+		}
+		setCondition(status, instance.Generation, ConditionSelfConfigCompliant,
+			!violation, reasonTrue, reasonFalse, msg)
+	}
 	if err := r.Status().Patch(ctx, &instance, client.MergeFrom(base)); err != nil {
 		// Status conflicts with our own resource writes are expected under
 		// rapid requeues; a fresh reconcile re-reads and re-applies.

@@ -165,6 +165,11 @@ type TypeClawInstanceSpec struct {
 	// with same-namespace-only ingress to the server port.
 	// +optional
 	Network NetworkSpec `json:"network,omitempty"`
+
+	// SelfConfig turns on observation of agent-authored typeclaw.json edits
+	// (ADR 0005). Unset means the Agent Folder stays opaque.
+	// +optional
+	SelfConfig *SelfConfigSpec `json:"selfConfig,omitempty"`
 }
 
 // TypeClawInstanceStatus reports observed reconciliation state. Conditions
@@ -196,6 +201,44 @@ type TypeClawInstanceStatus struct {
 	// already acted on, making one-shot restores idempotent.
 	// +optional
 	RestoreLastProcessed string `json:"restoreLastProcessed,omitempty"`
+
+	// SelfConfig carries the relay's latest observation of agent-authored
+	// config changes. Written exclusively by the relay; the operator
+	// projects it into the SelfConfigCompliant condition.
+	// +optional
+	SelfConfig *SelfConfigStatus `json:"selfConfig,omitempty"`
+}
+
+// SelfConfigSpec declares the platform policy for agent-authored config.
+type SelfConfigSpec struct {
+	// ProtectedPaths lists top-level typeclaw.json keys whose change marks
+	// the Instance non-compliant. Empty means every key is observable-only.
+	// +optional
+	ProtectedPaths []string `json:"protectedPaths,omitempty"`
+}
+
+// SelfConfigStatus is the relay-written observation record. One entry per
+// content change; the digest of the very first sighting seeds the baseline
+// with no changed paths.
+type SelfConfigStatus struct {
+	// ObservedDigest is the SHA-256 of typeclaw.json at ObservedAt.
+	ObservedDigest string `json:"observedDigest,omitempty"`
+
+	// ObservedAt is when that content was first seen by the relay.
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
+
+	// Revision increments on every observed content change, starting at 1.
+	Revision int64 `json:"revision,omitempty"`
+
+	// ChangedPaths lists the top-level keys that differ from the previously
+	// observed content. Empty on the baseline observation.
+	// +optional
+	ChangedPaths []string `json:"changedPaths,omitempty"`
+
+	// ProtectedViolation reports whether ChangedPaths intersected
+	// spec.selfConfig.protectedPaths at evaluation time.
+	ProtectedViolation bool `json:"protectedViolation,omitempty"`
 }
 
 // BackupStatus records snapshot health for gate decisions.

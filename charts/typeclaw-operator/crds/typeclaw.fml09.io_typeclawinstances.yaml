@@ -186,6 +186,19 @@ spec:
                       (ghcr.io/fml09/typeclaw-runtime:<version>). Ignored when Image is set.
                     type: string
                 type: object
+              selfConfig:
+                description: |-
+                  SelfConfig turns on observation of agent-authored typeclaw.json edits
+                  (ADR 0005). Unset means the Agent Folder stays opaque.
+                properties:
+                  protectedPaths:
+                    description: |-
+                      ProtectedPaths lists top-level typeclaw.json keys whose change marks
+                      the Instance non-compliant. Empty means every key is observable-only.
+                    items:
+                      type: string
+                    type: array
+                type: object
               storage:
                 description: Storage owns the durable volumes.
                 properties:
@@ -343,6 +356,39 @@ spec:
                   typeclaw.fml09.io/restore annotation this namespace's snapshot Job has
                   already acted on, making one-shot restores idempotent.
                 type: string
+              selfConfig:
+                description: |-
+                  SelfConfig carries the relay's latest observation of agent-authored
+                  config changes. Written exclusively by the relay; the operator
+                  projects it into the SelfConfigCompliant condition.
+                properties:
+                  changedPaths:
+                    description: |-
+                      ChangedPaths lists the top-level keys that differ from the previously
+                      observed content. Empty on the baseline observation.
+                    items:
+                      type: string
+                    type: array
+                  observedAt:
+                    description: ObservedAt is when that content was first seen by
+                      the relay.
+                    format: date-time
+                    type: string
+                  observedDigest:
+                    description: ObservedDigest is the SHA-256 of typeclaw.json at
+                      ObservedAt.
+                    type: string
+                  protectedViolation:
+                    description: |-
+                      ProtectedViolation reports whether ChangedPaths intersected
+                      spec.selfConfig.protectedPaths at evaluation time.
+                    type: boolean
+                  revision:
+                    description: Revision increments on every observed content change,
+                      starting at 1.
+                    format: int64
+                    type: integer
+                type: object
               update:
                 description: Update reports managed rollout progress.
                 properties:

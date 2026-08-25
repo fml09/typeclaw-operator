@@ -70,6 +70,9 @@ func RelaySidecar(runtimeID, controlDir, image string) corev1.Container {
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: relayControlVolumeName, MountPath: controlDir},
 			{Name: RelayTokenVolumeName, MountPath: RelayTokenMountPath, ReadOnly: true},
+			// SelfConfig observation reads typeclaw.json (ADR 0005);
+			// secrets files stay unreadable to the group by mode.
+			{Name: "agent-folder", MountPath: AgentMountPath, ReadOnly: true},
 		},
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: boolRef(false),
@@ -100,8 +103,10 @@ func RelayServiceAccount(instance *typeclawv1alpha1.TypeClawInstance) *corev1.Se
 	}
 }
 
-// RelayRole renders a namespace-scoped Role allowing the relay to get and
-// delete exactly its own StatefulSet Pod (<instance>-0) and nothing else.
+// RelayRole renders a namespace-scoped Role allowing the relay to delete
+// exactly its own StatefulSet Pod (<instance>-0) and, when SelfConfig
+// observation is on (ADR 0005), to fill the selfConfig block of its own
+// Instance status. Both grants are resourceNames-restricted; nothing else.
 func RelayRole(instance *typeclawv1alpha1.TypeClawInstance) *rbacv1.Role {
 	return &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{
@@ -109,12 +114,20 @@ func RelayRole(instance *typeclawv1alpha1.TypeClawInstance) *rbacv1.Role {
 			Namespace: instance.Namespace,
 			Labels:    Labels(instance),
 		},
-		Rules: []rbacv1.PolicyRule{{
-			APIGroups:     []string{""},
-			Resources:     []string{"pods"},
-			ResourceNames: []string{instance.Name + "-0"},
-			Verbs:         []string{"get", "delete"},
-		}},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups:     []string{""},
+				Resources:     []string{"pods"},
+				ResourceNames: []string{instance.Name + "-0"},
+				Verbs:         []string{"get", "delete"},
+			},
+			{
+				APIGroups:     []string{typeclawv1alpha1.GroupVersion.Group},
+				Resources:     []string{"typeclawinstances/status"},
+				ResourceNames: []string{instance.Name},
+				Verbs:         []string{"get", "patch"},
+			},
+		},
 	}
 }
 
