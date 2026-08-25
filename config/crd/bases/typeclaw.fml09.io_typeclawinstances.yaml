@@ -337,9 +337,21 @@ spec:
                   describe.
                 format: int64
                 type: integer
+              restoreLastProcessed:
+                description: |-
+                  RestoreLastProcessed records the last value of the
+                  typeclaw.fml09.io/restore annotation this namespace's snapshot Job has
+                  already acted on, making one-shot restores idempotent.
+                type: string
               update:
                 description: Update reports managed rollout progress.
                 properties:
+                  confirmationDeadline:
+                    description: |-
+                      ConfirmationDeadline bounds how long Confirming may last before the
+                      controller rolls back to the previously confirmed version.
+                    format: date-time
+                    type: string
                   currentVersion:
                     description: CurrentVersion is the runtime version currently confirmed
                       ready.

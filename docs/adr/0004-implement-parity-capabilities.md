@@ -25,8 +25,10 @@ schemas.
   by default (`onInstanceDeletion: Retain`, mapped to the native StatefulSet
   persistentVolumeClaimRetention policy — no finalizer, no root repair).
 - **#7 persistence/backup**: scheduled tar snapshots to a dedicated snapshot
-  volume, quiesced by scaling to zero during capture, count-based retention,
-  guarded restore into a suspended Instance with an empty-target check.
+  volume, count-based retention, and guarded restore into a suspended
+  Instance with an empty-target check. v1 captures snapshots live; crash
+  consistency relies on SQLite journal resilience rather than an unproven
+  scale-to-zero dance whose controller-death recovery semantics are unsafe.
   Object-storage destinations stay future work.
 - **#8 networking**: default-deny ingress allowing same namespace plus
   optional CIDRs on port 8973; egress `PublicWeb` (the CONTEXT.md destination

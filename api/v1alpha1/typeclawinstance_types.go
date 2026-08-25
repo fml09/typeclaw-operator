@@ -190,6 +190,12 @@ type TypeClawInstanceStatus struct {
 	// Update reports managed rollout progress.
 	// +optional
 	Update *UpdateStatus `json:"update,omitempty"`
+
+	// RestoreLastProcessed records the last value of the
+	// typeclaw.fml09.io/restore annotation this namespace's snapshot Job has
+	// already acted on, making one-shot restores idempotent.
+	// +optional
+	RestoreLastProcessed string `json:"restoreLastProcessed,omitempty"`
 }
 
 // BackupStatus records snapshot health for gate decisions.
@@ -219,6 +225,11 @@ type UpdateStatus struct {
 	// PromotedImage is the exact image reference the controller set on the
 	// workload during an active rollout.
 	PromotedImage string `json:"promotedImage,omitempty"`
+
+	// ConfirmationDeadline bounds how long Confirming may last before the
+	// controller rolls back to the previously confirmed version.
+	// +optional
+	ConfirmationDeadline *metav1.Time `json:"confirmationDeadline,omitempty"`
 
 	// Message carries human-readable rollout context, including rollback
 	// reasons.
