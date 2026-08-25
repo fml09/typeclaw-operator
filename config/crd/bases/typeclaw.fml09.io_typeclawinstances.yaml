@@ -1,0 +1,376 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: typeclawinstances.typeclaw.fml09.io
+spec:
+  group: typeclaw.fml09.io
+  names:
+    categories:
+    - typeclaw
+    kind: TypeClawInstance
+    listKind: TypeClawInstanceList
+    plural: typeclawinstances
+    singular: typeclawinstance
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.suspend
+      name: Suspended
+      type: boolean
+    - jsonPath: .spec.runtime.version
+      name: Runtime
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="RuntimeReady")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          TypeClawInstance manages one isolated TypeClaw agent: an independently
+          managed runtime identity with its own Agent Folder. One namespaced resource
+          owns exactly one workload; concurrent processes never share an Agent Folder.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              TypeClawInstanceSpec declares the operational policy the operator enforces
+              for one TypeClaw Instance. Runtime-owned state (sessions, Git history,
+              refreshed credentials) never lives here; it lives in the Agent Folder.
+            properties:
+              autoUpdate:
+                description: AutoUpdate manages managed-runtime rollouts from registry
+                  tags.
+                properties:
+                  confirmationTimeoutMinutes:
+                    default: 15
+                    description: |-
+                      ConfirmationTimeoutMinutes bounds how long a promoted version must
+                      hold readiness before the controller rolls back to the previous image.
+                    format: int32
+                    type: integer
+                  enabled:
+                    description: Enabled turns on polling and rollout management.
+                    type: boolean
+                  maxBackupAgeHours:
+                    default: 24
+                    description: MaxBackupAgeHours bounds freshness for RequireFreshBackup.
+                    format: int32
+                    type: integer
+                  requireFreshBackup:
+                    description: |-
+                      RequireFreshBackup blocks a rollout until a snapshot younger than
+                      MaxBackupAgeHours exists. Ignored when backup is disabled or false.
+                    type: boolean
+                  track:
+                    description: |-
+                      Track selects candidate versions: "latest", or a "<major>.<minor>"
+                      prefix such as "0.48" restricting candidates to that minor stream.
+                    pattern: ^(latest|[0-9]+\.[0-9]+)$
+                    type: string
+                required:
+                - enabled
+                type: object
+              backup:
+                description: |-
+                  Backup configures scheduled Agent Folder snapshots. Unset disables
+                  scheduled backups.
+                properties:
+                  retention:
+                    default: 7
+                    description: |-
+                      Retention is the maximum number of snapshots kept on the destination
+                      volume; older snapshots are pruned after each successful run.
+                    format: int32
+                    type: integer
+                  schedule:
+                    description: Cron schedule (standard five-field crontab) driving
+                      snapshot Jobs.
+                    type: string
+                  snapshotVolume:
+                    default:
+                      size: 10Gi
+                    description: |-
+                      SnapshotVolume provisions the destination volume receiving tar
+                      snapshots of the Agent Folder.
+                    properties:
+                      size:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 5Gi
+                        description: Requested capacity of the persistent volume.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      storageClassName:
+                        description: StorageClass to request. Unset means the cluster
+                          default class.
+                        type: string
+                    required:
+                    - size
+                    type: object
+                required:
+                - schedule
+                - snapshotVolume
+                type: object
+              exposeTUI:
+                description: |-
+                  ExposeTUI publishes a ClusterIP Service for the TUI WebSocket on the
+                  fixed runtime port 8973. Unset means exposed; only an explicit false
+                  removes the Service.
+                type: boolean
+              network:
+                description: |-
+                  Network declares ingress/egress policy. Unset means PublicWeb egress
+                  with same-namespace-only ingress to the server port.
+                properties:
+                  egress:
+                    default: PublicWeb
+                    description: |-
+                      Egress selects the destination universe. PublicWeb permits public
+                      DNS names and globally routable addresses after excluding private,
+                      special-use, cluster, node, metadata, and control-plane destinations;
+                      Unrestricted removes egress filtering entirely.
+                    enum:
+                    - PublicWeb
+                    - Unrestricted
+                    type: string
+                  ingressCIDRs:
+                    description: |-
+                      IngressCIDRs lists additional CIDR ranges allowed to reach the server
+                      port (TUI WebSocket and health endpoints). Same-namespace access is
+                      always permitted.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              restartRelay:
+                description: |-
+                  RestartRelay runs a same-Pod platform sidecar consuming the upstream
+                  file-spool restart contract and actuating Pod replacement through
+                  narrowly-scoped RBAC. Unset means enabled.
+                type: boolean
+              runtime:
+                description: Runtime selects the managed runtime image.
+                properties:
+                  image:
+                    description: |-
+                      Full image reference overriding the registry+version pairing. Must be
+                      version-pinned; floating tags are rejected by the workload contract.
+                    type: string
+                  version:
+                    description: |-
+                      Release version of the managed runtime image
+                      (ghcr.io/fml09/typeclaw-runtime:<version>). Ignored when Image is set.
+                    type: string
+                type: object
+              storage:
+                description: Storage owns the durable volumes.
+                properties:
+                  agentFolder:
+                    default:
+                      size: 5Gi
+                    description: |-
+                      AgentFolder provisions the PVC carrying the complete Agent Folder:
+                      authored config, Git history, sessions, memory, workspace, and the
+                      writable secrets envelope.
+                    properties:
+                      size:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 5Gi
+                        description: Requested capacity of the persistent volume.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      storageClassName:
+                        description: StorageClass to request. Unset means the cluster
+                          default class.
+                        type: string
+                    required:
+                    - size
+                    type: object
+                  onInstanceDeletion:
+                    default: Retain
+                    description: |-
+                      OnInstanceDeletion decides what happens to the Instance's persistent
+                      volumes when the TypeClawInstance is deleted. Retain (default) keeps
+                      the Agent Folder recoverable; Delete removes it with the workload.
+                    enum:
+                    - Retain
+                    - Delete
+                    type: string
+                  runtimeHome:
+                    description: |-
+                      RuntimeHome provisions the durable /home/typeclaw volume holding local
+                      CLI credentials and channel encryption keys. Leaving it unset attaches
+                      an emptyDir instead, which loses those secrets on Pod replacement; only
+                      accept that tradeoff for throwaway Instances.
+                    properties:
+                      size:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 5Gi
+                        description: Requested capacity of the persistent volume.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      storageClassName:
+                        description: StorageClass to request. Unset means the cluster
+                          default class.
+                        type: string
+                    required:
+                    - size
+                    type: object
+                required:
+                - agentFolder
+                type: object
+              suspend:
+                description: Suspend scales the workload to zero without deleting
+                  the Agent Folder.
+                type: boolean
+            type: object
+          status:
+            description: |-
+              TypeClawInstanceStatus reports observed reconciliation state. Conditions
+              describe TypeClaw-owned milestones rather than generic replica mirrors.
+            properties:
+              backup:
+                description: Backup reports the last observed snapshot state.
+                properties:
+                  lastSnapshotTime:
+                    description: LastSnapshotTime is when that snapshot completed.
+                    format: date-time
+                    type: string
+                  latestSnapshot:
+                    description: LatestSnapshot names the most recent successful snapshot
+                      archive.
+                    type: string
+                type: object
+              conditions:
+                description: |-
+                  Conditions carry ResourcesReady (desired workload resources accepted),
+                  RuntimeReady (workload Pod ready), BackupReady (scheduled snapshots
+                  healthy), and AutoUpdateReady (rollout management healthy).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the metadata.Generation the conditions
+                  describe.
+                format: int64
+                type: integer
+              update:
+                description: Update reports managed rollout progress.
+                properties:
+                  currentVersion:
+                    description: CurrentVersion is the runtime version currently confirmed
+                      ready.
+                    type: string
+                  message:
+                    description: |-
+                      Message carries human-readable rollout context, including rollback
+                      reasons.
+                    type: string
+                  phase:
+                    description: UpdatePhase enumerates managed rollout states.
+                    enum:
+                    - Idle
+                    - AwaitingBackup
+                    - Updating
+                    - Confirming
+                    - Ready
+                    - RolledBack
+                    type: string
+                  promotedImage:
+                    description: |-
+                      PromotedImage is the exact image reference the controller set on the
+                      workload during an active rollout.
+                    type: string
+                  targetVersion:
+                    description: TargetVersion is the version being promoted or confirmed.
+                    type: string
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

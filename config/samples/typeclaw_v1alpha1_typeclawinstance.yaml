@@ -1,0 +1,17 @@
+apiVersion: typeclaw.fml09.io/v1alpha1
+kind: TypeClawInstance
+metadata:
+  name: kakao-agent
+  namespace: typeclaw-system
+spec:
+  runtime:
+    version: 0.48.7
+  storage:
+    agentFolder:
+      size: 5Gi
+    # Durable /home/typeclaw keeps local CLI credentials and channel
+    # encryption keys across Pod replacement. Omit it only for throwaway
+    # Instances whose credential loss is acceptable.
+    runtimeHome:
+      size: 1Gi
+  exposeTUI: true

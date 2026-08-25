@@ -7,3 +7,8 @@
 
 # Vendored reference repositories
 .references/
+
+# Build and test artifacts
+/bin/
+/cover.out
+/tools-bin/
