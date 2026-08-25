@@ -27,7 +27,7 @@ vet:
 
 .PHONY: build
 build:
-	go build -o bin/manager cmd/main.go
+	go build -o bin/manager ./cmd/manager
 
 .PHONY: test
 test:
