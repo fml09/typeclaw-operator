@@ -109,8 +109,9 @@ func (r *BackupController) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 func (r *BackupController) applySnapshotResources(ctx context.Context, instance *typeclawv1alpha1.TypeClawInstance) error {
 	pvc := resources.SnapshotPVC(instance)
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
-		desired := resources.SnapshotPVC(instance)
-		pvc.Spec = desired.Spec
+		// Only ownership/labels may change after creation: a bound PVC's
+		// spec is immutable (the API server materializes defaults like
+		// storageClassName), so rewriting it here would hot-loop forever.
 		return r.own(instance, pvc)
 	}); err != nil {
 		return fmt.Errorf("apply snapshot PVC: %w", err)

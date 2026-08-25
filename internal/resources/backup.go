@@ -141,7 +141,7 @@ tar xzf "/snapshots/%[1]s" -C %[2]s`, snapshotArchive, AgentMountPath)
 // administrator-installed Localhost seccomp profile, no privilege
 // escalation, all capabilities dropped, and no API-server token. The agent
 // folder claim follows the StatefulSet's volumeClaimTemplate naming
-// (<instance>-agent-folder-0).
+// (<template>-<instance>-0 = agent-folder-<instance>-0).
 func backupPodSpec(
 	instance *typeclawv1alpha1.TypeClawInstance,
 	containerName, script string,
@@ -183,7 +183,7 @@ func backupPodSpec(
 				Name: "agent-folder",
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: fmt.Sprintf("%s-agent-folder-0", instance.Name),
+						ClaimName: fmt.Sprintf("agent-folder-%s-0", instance.Name),
 					},
 				},
 			},

@@ -140,8 +140,8 @@ func TestBackupCronJobScriptAndMounts(t *testing.T) {
 	for _, v := range cj.Spec.JobTemplate.Spec.Template.Spec.Volumes {
 		volumes[v.Name] = v
 	}
-	if got := volumes["agent-folder"].PersistentVolumeClaim.ClaimName; got != "kakao-agent-agent-folder-0" {
-		t.Fatalf("agent volume claim = %q, want kakao-agent-agent-folder-0", got)
+	if got := volumes["agent-folder"].PersistentVolumeClaim.ClaimName; got != "agent-folder-kakao-agent-0" {
+		t.Fatalf("agent volume claim = %q, want agent-folder-kakao-agent-0 (volumeClaimTemplate order)", got)
 	}
 	if got := volumes["snapshots"].PersistentVolumeClaim.ClaimName; got != "kakao-agent-snapshots" {
 		t.Fatalf("snapshots volume claim = %q, want kakao-agent-snapshots", got)

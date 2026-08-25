@@ -362,5 +362,6 @@ func (r *AutoUpdateReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&typeclawv1alpha1.TypeClawInstance{}).
 		Owns(&appsv1.StatefulSet{}).
+		Named("typeclawinstance-autoupdate").
 		Complete(r)
 }
