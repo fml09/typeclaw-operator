@@ -1,0 +1,17 @@
+{{- if .Values.metricsService.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "typeclaw-operator.fullname" . }}-metrics
+  labels:
+    {{- include "typeclaw-operator.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.metricsService.type }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metricsService.port }}
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "typeclaw-operator.selectorLabels" . | nindent 4 }}
+{{- end }}

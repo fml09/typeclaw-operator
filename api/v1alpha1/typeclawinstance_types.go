@@ -212,6 +212,16 @@ type BackupStatus struct {
 // +kubebuilder:validation:Enum=Idle;AwaitingBackup;Updating;Confirming;Ready;RolledBack
 type UpdatePhase string
 
+// UpdatePhase values of the managed rollout state machine.
+const (
+	UpdatePhaseIdle           UpdatePhase = "Idle"
+	UpdatePhaseAwaitingBackup UpdatePhase = "AwaitingBackup"
+	UpdatePhaseUpdating       UpdatePhase = "Updating"
+	UpdatePhaseConfirming     UpdatePhase = "Confirming"
+	UpdatePhaseReady          UpdatePhase = "Ready"
+	UpdatePhaseRolledBack     UpdatePhase = "RolledBack"
+)
+
 // UpdateStatus tracks registry-driven rollouts without touching spec.
 type UpdateStatus struct {
 	Phase UpdatePhase `json:"phase,omitempty"`

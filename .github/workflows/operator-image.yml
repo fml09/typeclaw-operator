@@ -1,0 +1,93 @@
+name: Operator Image
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/fml09/typeclaw-operator
+
+jobs:
+  build:
+    name: Build and smoke (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build linux/${{ matrix.arch }} image
+        run: docker build --platform linux/${{ matrix.arch }} -t typeclaw-operator:${{ matrix.arch }} .
+
+      - name: Smoke — /manager and /relay present, nonroot user
+        run: |
+          cid="$(docker create typeclaw-operator:${{ matrix.arch }})"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          entries="$(docker export "$cid" | tar -t)"
+          for bin in manager relay; do
+            printf '%s\n' "$entries" | grep -qx -e "$bin" -e "./$bin" \
+              || { echo "::error::/$bin missing from image"; exit 1; }
+          done
+          user="$(docker inspect --format '{{.Config.User}}' "$cid")"
+          [ "$user" = "65532:65532" ] \
+            || { echo "::error::unexpected Config.User '$user'"; exit 1; }
+          echo "smoke ok: /manager + /relay present, Config.User=$user"
+
+      - name: Export image tarball
+        run: docker save typeclaw-operator:${{ matrix.arch }} -o "/tmp/image-${{ matrix.arch }}.tar"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.arch }}
+          path: /tmp/image-${{ matrix.arch }}.tar
+          retention-days: 1
+
+  publish:
+    name: Publish multi-arch image to GHCR
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: image-*
+          path: /tmp
+          merge-multiple: true
+
+      - name: Push per-architecture images
+        run: |
+          sha7="${GITHUB_SHA::7}"
+          for arch in amd64 arm64; do
+            docker load -i "/tmp/image-${arch}.tar"
+            docker tag "typeclaw-operator:${arch}" "${IMAGE}:${sha7}-${arch}"
+            docker push "${IMAGE}:${sha7}-${arch}"
+          done
+
+      - name: Create and push multi-arch manifests
+        run: |
+          sha7="${GITHUB_SHA::7}"
+          for tag in "$sha7" latest; do
+            docker manifest create "${IMAGE}:${tag}" \
+              --amend "${IMAGE}:${sha7}-amd64" \
+              --amend "${IMAGE}:${sha7}-arm64"
+            docker manifest push "${IMAGE}:${tag}"
+          done

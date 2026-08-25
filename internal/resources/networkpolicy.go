@@ -1,0 +1,178 @@
+/*
+Copyright 2026 fml09.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package resources
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+
+	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
+)
+
+const (
+	// EgressPublicWeb renders the PublicWeb destination universe (CONTEXT.md):
+	// public DNS names and globally routable Internet addresses after
+	// excluding private, special-use, cluster, node, metadata, and
+	// control-plane destinations.
+	EgressPublicWeb = "PublicWeb"
+
+	// EgressUnrestricted removes egress filtering entirely; the runtime may
+	// reach any destination, including cluster-internal services.
+	EgressUnrestricted = "Unrestricted"
+
+	// DNSSystemNamespace hosts the cluster DNS workload every PublicWeb
+	// policy must reach for name resolution.
+	DNSSystemNamespace = "kube-system"
+)
+
+// netPublicWebV4Except enumerates the RFC special-use and private ranges
+// carved out of the PublicWeb allow-all block so cluster, node, metadata, and
+// control-plane destinations stay unreachable from a Restricted Workload.
+var netPublicWebV4Except = []string{
+	"10.0.0.0/8",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+	"169.254.0.0/16",
+	"100.64.0.0/10",
+	"127.0.0.0/8",
+	"0.0.0.0/8",
+	"192.0.0.0/24",
+	"198.18.0.0/15",
+	"224.0.0.0/4",
+}
+
+// netPublicWebV6Except carves out loopback, unique-local, and link-local
+// ranges from the IPv6 allow-all block.
+var netPublicWebV6Except = []string{
+	"::1/128",
+	"fc00::/7",
+	"fe80::/10",
+}
+
+// NetworkPolicy renders the externally enforced traffic boundary of one TypeClaw
+// Instance. The policy always declares both Ingress and Egress regardless of
+// defaults: an absent spec.network means PublicWeb egress with same-namespace
+// -only ingress, never "no policy".
+func NetworkPolicy(instance *typeclawv1alpha1.TypeClawInstance) *networkingv1.NetworkPolicy {
+	labels := Labels(instance)
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      instance.Name,
+			Namespace: instance.Namespace,
+			Labels:    labels,
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: labels},
+			PolicyTypes: []networkingv1.PolicyType{
+				networkingv1.PolicyTypeIngress,
+				networkingv1.PolicyTypeEgress,
+			},
+			Ingress: netIngressRules(instance),
+			Egress:  netEgressRules(instance.Spec.Network.Egress),
+		},
+	}
+}
+
+// netIngressRules admits the server port from same-namespace peers always,
+// plus one explicit CIDR rule per spec.network.IngressCIDRs entry.
+func netIngressRules(instance *typeclawv1alpha1.TypeClawInstance) []networkingv1.NetworkPolicyIngressRule {
+	rules := []networkingv1.NetworkPolicyIngressRule{
+		{
+			From: []networkingv1.NetworkPolicyPeer{
+				// Empty podSelector selects every Pod in the policy's own
+				// namespace.
+				{PodSelector: &metav1.LabelSelector{}},
+			},
+			Ports: []networkingv1.NetworkPolicyPort{{Port: netIntOrStr(ContainerPort)}},
+		},
+	}
+	for _, cidr := range instance.Spec.Network.IngressCIDRs {
+		if cidr == "" {
+			continue
+		}
+		rules = append(rules, networkingv1.NetworkPolicyIngressRule{
+			From: []networkingv1.NetworkPolicyPeer{
+				{IPBlock: &networkingv1.IPBlock{CIDR: cidr}},
+			},
+			Ports: []networkingv1.NetworkPolicyPort{{Port: netIntOrStr(ContainerPort)}},
+		})
+	}
+	return rules
+}
+
+// netEgressRules maps the declared destination universe onto policy rules. An
+// empty value means PublicWeb: unset specs render the safe default, not an
+// unfiltered policy.
+func netEgressRules(egress string) []networkingv1.NetworkPolicyEgressRule {
+	switch egress {
+	case EgressUnrestricted:
+		return []networkingv1.NetworkPolicyEgressRule{
+			{
+				To: []networkingv1.NetworkPolicyPeer{
+					{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0"}},
+					{IPBlock: &networkingv1.IPBlock{CIDR: "::/0"}},
+				},
+			},
+		}
+	default:
+		// PublicWeb: cluster DNS first, then globally routable space with the
+		// special-use carve-outs.
+		dns := networkingv1.NetworkPolicyEgressRule{
+			To: []networkingv1.NetworkPolicyPeer{
+				{
+					NamespaceSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"kubernetes.io/metadata.name": DNSSystemNamespace},
+					},
+					PodSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"k8s-app": "kube-dns"},
+					},
+				},
+			},
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Protocol: netProtocolPtr(corev1.ProtocolUDP), Port: netIntOrStr(53)},
+				{Protocol: netProtocolPtr(corev1.ProtocolTCP), Port: netIntOrStr(53)},
+			},
+		}
+		web := networkingv1.NetworkPolicyEgressRule{
+			To: []networkingv1.NetworkPolicyPeer{
+				{
+					IPBlock: &networkingv1.IPBlock{
+						CIDR:   "0.0.0.0/0",
+						Except: netPublicWebV4Except,
+					},
+				},
+				{
+					IPBlock: &networkingv1.IPBlock{
+						CIDR:   "::/0",
+						Except: netPublicWebV6Except,
+					},
+				},
+			},
+		}
+		return []networkingv1.NetworkPolicyEgressRule{dns, web}
+	}
+}
+
+// netIntOrStr builds the port value every NetworkPolicy rule uses.
+func netIntOrStr(v int32) *intstr.IntOrString {
+	s := intstr.FromInt32(v)
+	return &s
+}
+
+func netProtocolPtr(p corev1.Protocol) *corev1.Protocol { return &p }

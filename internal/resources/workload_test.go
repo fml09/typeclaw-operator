@@ -3,6 +3,7 @@ package resources
 import (
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -215,5 +216,88 @@ func TestServiceExposesFixedServerPort(t *testing.T) {
 	}
 	if svc.Spec.Selector["app.kubernetes.io/instance"] != "kakao-agent" {
 		t.Errorf("selector must target this instance: %+v", svc.Spec.Selector)
+	}
+}
+
+func TestStatefulSetRelaySidecarWiring(t *testing.T) {
+	sts, err := StatefulSet(instance("kakao-agent", nil))
+	if err != nil {
+		t.Fatalf("StatefulSet() error: %v", err)
+	}
+	pod := sts.Spec.Template.Spec
+	if len(pod.Containers) != 2 {
+		t.Fatalf("default must run runtime plus relay sidecar, got %d containers", len(pod.Containers))
+	}
+	sidecar := pod.Containers[1]
+	if sidecar.Name != RelayContainerName || sidecar.Image != DefaultOperatorImage {
+		t.Errorf("sidecar misrendered: name=%q image=%q", sidecar.Name, sidecar.Image)
+	}
+	if pod.ServiceAccountName != "kakao-agent-relay" {
+		t.Errorf("pod must use the dedicated relay identity, got %q", pod.ServiceAccountName)
+	}
+	var tokenVolume bool
+	for _, v := range pod.Volumes {
+		if v.Name == RelayTokenVolumeName && v.Projected != nil {
+			tokenVolume = true
+		}
+	}
+	if !tokenVolume {
+		t.Errorf("projected relay token volume missing")
+	}
+
+	disabled := instance("quiet", func(in *typeclawv1alpha1.TypeClawInstance) {
+		f := false
+		in.Spec.RestartRelay = &f
+	})
+	stsOff, err := StatefulSet(disabled)
+	if err != nil {
+		t.Fatalf("StatefulSet() error: %v", err)
+	}
+	podOff := stsOff.Spec.Template.Spec
+	if len(podOff.Containers) != 1 || podOff.ServiceAccountName != "" {
+		t.Errorf("disabled relay must drop sidecar and identity: containers=%d sa=%q",
+			len(podOff.Containers), podOff.ServiceAccountName)
+	}
+}
+
+func TestStatefulSetClaimRetentionPolicy(t *testing.T) {
+	defaults, err := StatefulSet(instance("kakao-agent", nil))
+	if err != nil {
+		t.Fatalf("StatefulSet() error: %v", err)
+	}
+	policy := defaults.Spec.PersistentVolumeClaimRetentionPolicy
+	if policy == nil || policy.WhenDeleted != appsv1.RetainPersistentVolumeClaimRetentionPolicyType {
+		t.Fatalf("unset onInstanceDeletion must retain claims on Instance deletion")
+	}
+
+	del := instance("kakao-agent", func(in *typeclawv1alpha1.TypeClawInstance) {
+		in.Spec.Storage.OnInstanceDeletion = "Delete"
+	})
+	deleting, err := StatefulSet(del)
+	if err != nil {
+		t.Fatalf("StatefulSet() error: %v", err)
+	}
+	policy = deleting.Spec.PersistentVolumeClaimRetentionPolicy
+	if policy.WhenDeleted != appsv1.DeletePersistentVolumeClaimRetentionPolicyType {
+		t.Fatalf("explicit Delete must map to claim deletion, got %v", policy.WhenDeleted)
+	}
+	if policy.WhenScaled != appsv1.RetainPersistentVolumeClaimRetentionPolicyType {
+		t.Fatalf("suspend-to-zero must never delete claims, got WhenScaled=%v", policy.WhenScaled)
+	}
+}
+
+func TestStatefulSetPromotedImageWinsDuringRollout(t *testing.T) {
+	in := instance("kakao-agent", func(in *typeclawv1alpha1.TypeClawInstance) {
+		in.Status.Update = &typeclawv1alpha1.UpdateStatus{
+			Phase:         typeclawv1alpha1.UpdatePhaseUpdating,
+			PromotedImage: "ghcr.io/fml09/typeclaw-runtime:0.49.0",
+		}
+	})
+	sts, err := StatefulSet(in)
+	if err != nil {
+		t.Fatalf("StatefulSet() error: %v", err)
+	}
+	if got := sts.Spec.Template.Spec.Containers[0].Image; got != "ghcr.io/fml09/typeclaw-runtime:0.49.0" {
+		t.Fatalf("active promotion must drive the rendered image, got %q", got)
 	}
 }

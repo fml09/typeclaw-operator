@@ -49,6 +49,10 @@ const (
 	// or Unconfined.
 	SeccompLocalhostProfile = "localhost/profiles/typeclaw/native-localbwrap.json"
 
+	// DefaultOperatorImage carries the restart-relay binary. Version-coupled
+	// to the chart appVersion so sidecar and manager upgrade together.
+	DefaultOperatorImage = "ghcr.io/fml09/typeclaw-operator:0.1.0"
+
 	gracePeriodSeconds = 120
 	tmpMemorySize      = "256Mi"
 	shmMemorySize      = "512Mi"
@@ -145,6 +149,9 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 		mounts = append(mounts, corev1.VolumeMount{Name: "runtime-home", MountPath: RuntimeHomeMountPath})
 	}
 
+	relayEnabled := instance.Spec.RestartRelay == nil || *instance.Spec.RestartRelay
+	runtimeID := fmt.Sprintf("%s/%s", instance.Namespace, instance.Name)
+
 	replicas := int32(1)
 	if instance.Spec.Suspend {
 		replicas = 0
@@ -159,6 +166,12 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 		Spec: appsv1.StatefulSetSpec{
 			ServiceName: instance.Name,
 			Replicas:    &replicas,
+			// Suspend-to-zero must never delete claims; only the explicit
+			// onInstanceDeletion policy decides removal.
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: claimRetention(instance),
+				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"app.kubernetes.io/name":     labels["app.kubernetes.io/name"],
@@ -171,6 +184,7 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 				Spec: corev1.PodSpec{
 					AutomountServiceAccountToken:  boolRef(false),
 					TerminationGracePeriodSeconds: func() *int64 { v := int64(gracePeriodSeconds); return &v }(),
+					ServiceAccountName:            serviceAccountNameFor(relayEnabled, instance),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: boolRef(true),
 						RunAsUser:    int64Ref(RuntimeUID),
@@ -183,7 +197,7 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 					},
 					Containers: []corev1.Container{{
 						Name:            "runtime",
-						Image:           ResolveRuntimeImage(instance.Spec),
+						Image:           EffectiveRuntimeImage(instance),
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Env: []corev1.EnvVar{
 							{Name: "TYPECLAW_DEPLOYMENT_PROFILE", Value: "managed"},
@@ -215,7 +229,32 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 			},
 		},
 	}
+	if relayEnabled {
+		sts.Spec.Template.Spec.Containers = append(
+			sts.Spec.Template.Spec.Containers,
+			RelaySidecar(runtimeID, ManagedControlDir, DefaultOperatorImage),
+		)
+		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, RelayTokenVolume())
+	}
 	return sts, nil
+}
+
+// claimRetention maps the declared deletion policy onto the native StatefulSet
+// claim retention. Anything but an explicit Delete retains the Agent Folder.
+func claimRetention(instance *typeclawv1alpha1.TypeClawInstance) appsv1.PersistentVolumeClaimRetentionPolicyType {
+	if instance.Spec.Storage.OnInstanceDeletion == "Delete" {
+		return appsv1.DeletePersistentVolumeClaimRetentionPolicyType
+	}
+	return appsv1.RetainPersistentVolumeClaimRetentionPolicyType
+}
+
+// serviceAccountNameFor points the Pod at the relay identity only when the
+// relay runs; the projected token volume sources from this identity.
+func serviceAccountNameFor(relayEnabled bool, instance *typeclawv1alpha1.TypeClawInstance) string {
+	if !relayEnabled {
+		return ""
+	}
+	return relayResourceName(instance)
 }
 
 // Service exposes the runtime server (TUI WebSocket and health endpoints)

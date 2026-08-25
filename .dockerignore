@@ -1,0 +1,7 @@
+.git
+.references
+.tmp
+bin
+cover.out
+charts
+*.md

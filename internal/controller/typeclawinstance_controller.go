@@ -6,6 +6,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -92,6 +93,23 @@ func (r *TypeClawInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		} else if err := r.deleteService(ctx, &instance); err != nil {
 			return err
 		}
+
+		relayEnabled := instance.Spec.RestartRelay == nil || *instance.Spec.RestartRelay
+		if relayEnabled {
+			for _, obj := range []client.Object{
+				resources.RelayServiceAccount(&instance),
+				resources.RelayRole(&instance),
+				resources.RelayRoleBinding(&instance),
+			} {
+				if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, obj, func() error {
+					return r.own(&instance, obj)
+				}); err != nil {
+					return fmt.Errorf("apply relay RBAC %T: %w", obj, err)
+				}
+			}
+		} else if err := r.deleteRelayRBAC(ctx, &instance); err != nil {
+			return err
+		}
 		return nil
 	}()
 
@@ -150,6 +168,22 @@ func (r *TypeClawInstanceReconciler) deleteService(ctx context.Context, instance
 	err := r.Delete(ctx, svc)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("remove TUI Service: %w", err)
+	}
+	return nil
+}
+
+// deleteRelayRBAC removes the relay identity trio when the sidecar is
+// disabled, keeping a clean cutover in both directions.
+func (r *TypeClawInstanceReconciler) deleteRelayRBAC(ctx context.Context, instance *typeclawv1alpha1.TypeClawInstance) error {
+	name := instance.Name + "-relay"
+	for _, obj := range []client.Object{
+		&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: instance.Namespace}},
+		&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: instance.Namespace}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: instance.Namespace}},
+	} {
+		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("remove relay RBAC %T: %w", obj, err)
+		}
 	}
 	return nil
 }
