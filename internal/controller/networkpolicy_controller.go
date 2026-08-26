@@ -41,7 +41,7 @@ type NetworkPolicyReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=core,resources=endpoints,verbs=get
+// +kubebuilder:rbac:groups=core,resources=endpoints,verbs=get;list;watch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile applies the declared Network Authority for one TypeClaw Instance

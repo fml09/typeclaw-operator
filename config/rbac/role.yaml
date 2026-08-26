@@ -10,6 +10,8 @@ rules:
   - endpoints
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -21,6 +23,7 @@ rules:
   - ""
   resources:
   - persistentvolumeclaims
+  - serviceaccounts
   - services
   verbs:
   - create
@@ -59,6 +62,19 @@ rules:
   - networking.k8s.io
   resources:
   - networkpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  - roles
   verbs:
   - create
   - delete
