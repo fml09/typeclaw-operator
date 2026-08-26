@@ -58,7 +58,10 @@ func (r *NetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// endpoints so the policy admits exactly those destinations instead of
 	// widening PublicWeb.
 	var apiServerIPs []string
-	if instance.Spec.SelfConfig != nil {
+	// The restart relay reaches the Kubernetes API whenever it runs — not
+	// only for SelfConfig observation — so gate on either consumer.
+	relayEnabled := instance.Spec.RestartRelay == nil || *instance.Spec.RestartRelay
+	if relayEnabled || instance.Spec.SelfConfig != nil {
 		var eps corev1.Endpoints
 		if err := r.Get(ctx, client.ObjectKey{Name: "kubernetes", Namespace: "default"}, &eps); err == nil {
 			for _, subset := range eps.Subsets {

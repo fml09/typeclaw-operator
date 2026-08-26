@@ -8,7 +8,7 @@ import (
 // DefaultRuntimeVersion is the managed runtime release consumed when neither
 // spec.runtime.version nor spec.runtime.image pins an artifact. It tracks the
 // fml09/typeclaw releases that publish the managed runtime image (ADR 0003).
-const DefaultRuntimeVersion = "0.48.7"
+const DefaultRuntimeVersion = "0.48.9"
 
 // VolumeClaimSpec declares one durable volume backed by a PVC template.
 type VolumeClaimSpec struct {
@@ -166,10 +166,29 @@ type TypeClawInstanceSpec struct {
 	// +optional
 	Network NetworkSpec `json:"network,omitempty"`
 
+	// Security selects deviations from the Restricted Workload baseline
+	// (ADR 0001). The default is the certified Localhost seccomp profile;
+	// anything weaker is an explicit, recorded environment decision.
+	// +optional
+	Security *SecuritySpec `json:"security,omitempty"`
+
 	// SelfConfig turns on observation of agent-authored typeclaw.json edits
 	// (ADR 0005). Unset means the Agent Folder stays opaque.
 	// +optional
 	SelfConfig *SelfConfigSpec `json:"selfConfig,omitempty"`
+}
+
+// SecuritySpec declares workload security-envelope selections. Anything
+// below the Localhost baseline weakens kernel-level tool isolation and MUST
+// be a documented environment decision (operator ADR 0001/0006).
+type SecuritySpec struct {
+	// SeccompProfile selects the container seccomp posture. Localhost
+	// (default) requires the administrator-installed bubblewrap-admitting
+	// profile at SeccompLocalhostProfile; Unconfined admits every syscall
+	// and exists for environments that cannot host profiles yet.
+	// +kubebuilder:validation:Enum=Localhost;Unconfined
+	// +kubebuilder:default=Localhost
+	SeccompProfile string `json:"seccompProfile,omitempty"`
 }
 
 // TypeClawInstanceStatus reports observed reconciliation state. Conditions

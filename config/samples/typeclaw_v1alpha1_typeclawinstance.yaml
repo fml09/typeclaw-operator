@@ -5,7 +5,7 @@ metadata:
   namespace: typeclaw-system
 spec:
   runtime:
-    version: 0.48.7
+    version: 0.48.9
   storage:
     agentFolder:
       size: 5Gi

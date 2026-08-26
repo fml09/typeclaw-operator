@@ -186,6 +186,24 @@ spec:
                       (ghcr.io/fml09/typeclaw-runtime:<version>). Ignored when Image is set.
                     type: string
                 type: object
+              security:
+                description: |-
+                  Security selects deviations from the Restricted Workload baseline
+                  (ADR 0001). The default is the certified Localhost seccomp profile;
+                  anything weaker is an explicit, recorded environment decision.
+                properties:
+                  seccompProfile:
+                    default: Localhost
+                    description: |-
+                      SeccompProfile selects the container seccomp posture. Localhost
+                      (default) requires the administrator-installed bubblewrap-admitting
+                      profile at SeccompLocalhostProfile; Unconfined admits every syscall
+                      and exists for environments that cannot host profiles yet.
+                    enum:
+                    - Localhost
+                    - Unconfined
+                    type: string
+                type: object
               selfConfig:
                 description: |-
                   SelfConfig turns on observation of agent-authored typeclaw.json edits

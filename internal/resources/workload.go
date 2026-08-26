@@ -190,10 +190,13 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 						RunAsUser:    int64Ref(RuntimeUID),
 						RunAsGroup:   int64Ref(RuntimeGID),
 						FSGroup:      int64Ref(RuntimeGID),
-						SeccompProfile: &corev1.SeccompProfile{
-							Type:             corev1.SeccompProfileTypeLocalhost,
-							LocalhostProfile: strRef(SeccompLocalhostProfile),
-						},
+						SeccompProfile: seccompProfileFor(
+							instance.Spec.Security,
+							corev1.SeccompProfile{
+								Type:             corev1.SeccompProfileTypeLocalhost,
+								LocalhostProfile: strRef(SeccompLocalhostProfile),
+							},
+						),
 					},
 					Containers: []corev1.Container{{
 						Name:            "runtime",
@@ -237,6 +240,16 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, RelayTokenVolume(), RelayCAVolume())
 	}
 	return sts, nil
+}
+
+// seccompProfileFor resolves the declared seccomp posture. Unset or Localhost
+// keeps the ADR 0001 baseline; Unconfined is an explicit environment escape
+// hatch for clusters that cannot host profiles yet (ADR 0006).
+func seccompProfileFor(sec *typeclawv1alpha1.SecuritySpec, baseline corev1.SeccompProfile) *corev1.SeccompProfile {
+	if sec != nil && sec.SeccompProfile == "Unconfined" {
+		return &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}
+	}
+	return &baseline
 }
 
 // claimRetention maps the declared deletion policy onto the native StatefulSet

@@ -85,7 +85,7 @@ jobs:
       - name: Create and push multi-arch manifests
         run: |
           sha7="${GITHUB_SHA::7}"
-          for tag in "$sha7" latest; do
+          for tag in "$sha7" 0.1.0 latest; do
             docker manifest create "${IMAGE}:${tag}" \
               --amend "${IMAGE}:${sha7}-amd64" \
               --amend "${IMAGE}:${sha7}-arm64"
