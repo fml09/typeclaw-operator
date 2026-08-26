@@ -50,6 +50,7 @@ type TypeClawInstanceReconciler struct {
 // +kubebuilder:rbac:groups=typeclaw.fml09.io,resources=typeclawinstances/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=typeclaw.fml09.io,resources=typeclawinstances/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
