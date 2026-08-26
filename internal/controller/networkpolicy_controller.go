@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -40,6 +41,7 @@ type NetworkPolicyReconciler struct {
 	Scheme *runtime.Scheme
 }
 
+// +kubebuilder:rbac:groups=core,resources=endpoints,verbs=get
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile applies the declared Network Authority for one TypeClaw Instance
@@ -51,11 +53,33 @@ func (r *NetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	policy := resources.NetworkPolicy(&instance)
+	// SelfConfig observation gives the relay sidecar a legitimate need to
+	// reach the Kubernetes API (ADR 0005). Discover the API server's real
+	// endpoints so the policy admits exactly those destinations instead of
+	// widening PublicWeb.
+	var apiServerIPs []string
+	if instance.Spec.SelfConfig != nil {
+		var eps corev1.Endpoints
+		if err := r.Get(ctx, client.ObjectKey{Name: "kubernetes", Namespace: "default"}, &eps); err == nil {
+			for _, subset := range eps.Subsets {
+				for _, addr := range subset.Addresses {
+					apiServerIPs = append(apiServerIPs, addr.IP)
+				}
+			}
+		}
+		// Egress policies match pre-DNAT destinations, so the Service's
+		// cluster IP — what DNS hands the relay — needs its own /32.
+		var svc corev1.Service
+		if err := r.Get(ctx, client.ObjectKey{Name: "kubernetes", Namespace: "default"}, &svc); err == nil && svc.Spec.ClusterIP != "" {
+			apiServerIPs = append(apiServerIPs, svc.Spec.ClusterIP)
+		}
+	}
+
+	policy := resources.NetworkPolicy(&instance, apiServerIPs...)
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, policy, func() error {
 		// Re-derive the full desired spec so a stale live object cannot keep
 		// old ingress CIDRs or an egress universe from a previous spec.
-		desired := resources.NetworkPolicy(&instance)
+		desired := resources.NetworkPolicy(&instance, apiServerIPs...)
 		policy.Spec = desired.Spec
 		return netOwn(r, &instance, policy)
 	}); err != nil {

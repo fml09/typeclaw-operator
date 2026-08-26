@@ -65,11 +65,15 @@ var netPublicWebV6Except = []string{
 	"fe80::/10",
 }
 
-// NetworkPolicy renders the externally enforced traffic boundary of one TypeClaw
-// Instance. The policy always declares both Ingress and Egress regardless of
-// defaults: an absent spec.network means PublicWeb egress with same-namespace
-// -only ingress, never "no policy".
-func NetworkPolicy(instance *typeclawv1alpha1.TypeClawInstance) *networkingv1.NetworkPolicy {
+// NetworkPolicy renders the externally enforced traffic boundary of one
+// TypeClaw Instance. The policy always declares both Ingress and Egress
+// regardless of defaults: an absent spec.network means PublicWeb egress with
+// same-namespace-only ingress, never "no policy".
+//
+// apiServerIPs carries the discovered Kubernetes API server endpoints; when
+// SelfConfig observation is on, the relay sidecar needs exactly these
+// destinations on 443 to reach the API from inside a PublicWeb policy.
+func NetworkPolicy(instance *typeclawv1alpha1.TypeClawInstance, apiServerIPs ...string) *networkingv1.NetworkPolicy {
 	labels := Labels(instance)
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
@@ -84,7 +88,7 @@ func NetworkPolicy(instance *typeclawv1alpha1.TypeClawInstance) *networkingv1.Ne
 				networkingv1.PolicyTypeEgress,
 			},
 			Ingress: netIngressRules(instance),
-			Egress:  netEgressRules(instance.Spec.Network.Egress),
+			Egress:  netEgressRules(instance.Spec.Network.Egress, apiServerIPs...),
 		},
 	}
 }
@@ -119,10 +123,11 @@ func netIngressRules(instance *typeclawv1alpha1.TypeClawInstance) []networkingv1
 // netEgressRules maps the declared destination universe onto policy rules. An
 // empty value means PublicWeb: unset specs render the safe default, not an
 // unfiltered policy.
-func netEgressRules(egress string) []networkingv1.NetworkPolicyEgressRule {
+func netEgressRules(egress string, apiServerIPs ...string) []networkingv1.NetworkPolicyEgressRule {
+	var rules []networkingv1.NetworkPolicyEgressRule
 	switch egress {
 	case EgressUnrestricted:
-		return []networkingv1.NetworkPolicyEgressRule{
+		rules = []networkingv1.NetworkPolicyEgressRule{
 			{
 				To: []networkingv1.NetworkPolicyPeer{
 					{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0"}},
@@ -131,42 +136,59 @@ func netEgressRules(egress string) []networkingv1.NetworkPolicyEgressRule {
 			},
 		}
 	default:
-		// PublicWeb: cluster DNS first, then globally routable space with the
-		// special-use carve-outs.
-		dns := networkingv1.NetworkPolicyEgressRule{
-			To: []networkingv1.NetworkPolicyPeer{
-				{
-					NamespaceSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"kubernetes.io/metadata.name": DNSSystemNamespace},
-					},
-					PodSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"k8s-app": "kube-dns"},
+		// PublicWeb: cluster DNS first, then globally routable space with
+		// the special-use carve-outs.
+		rules = []networkingv1.NetworkPolicyEgressRule{
+			{
+				To: []networkingv1.NetworkPolicyPeer{
+					{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"kubernetes.io/metadata.name": DNSSystemNamespace},
+						},
+						PodSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"k8s-app": "kube-dns"},
+						},
 					},
 				},
+				Ports: []networkingv1.NetworkPolicyPort{
+					{Protocol: netProtocolPtr(corev1.ProtocolUDP), Port: netIntOrStr(53)},
+					{Protocol: netProtocolPtr(corev1.ProtocolTCP), Port: netIntOrStr(53)},
+				},
 			},
-			Ports: []networkingv1.NetworkPolicyPort{
-				{Protocol: netProtocolPtr(corev1.ProtocolUDP), Port: netIntOrStr(53)},
-				{Protocol: netProtocolPtr(corev1.ProtocolTCP), Port: netIntOrStr(53)},
+			{
+				To: []networkingv1.NetworkPolicyPeer{
+					{
+						IPBlock: &networkingv1.IPBlock{
+							CIDR:   "0.0.0.0/0",
+							Except: netPublicWebV4Except,
+						},
+					},
+					{
+						IPBlock: &networkingv1.IPBlock{
+							CIDR:   "::/0",
+							Except: netPublicWebV6Except,
+						},
+					},
+				},
 			},
 		}
-		web := networkingv1.NetworkPolicyEgressRule{
-			To: []networkingv1.NetworkPolicyPeer{
-				{
-					IPBlock: &networkingv1.IPBlock{
-						CIDR:   "0.0.0.0/0",
-						Except: netPublicWebV4Except,
-					},
-				},
-				{
-					IPBlock: &networkingv1.IPBlock{
-						CIDR:   "::/0",
-						Except: netPublicWebV6Except,
-					},
-				},
-			},
-		}
-		return []networkingv1.NetworkPolicyEgressRule{dns, web}
 	}
+	if len(apiServerIPs) > 0 {
+		peers := make([]networkingv1.NetworkPolicyPeer, 0, len(apiServerIPs))
+		for _, ip := range apiServerIPs {
+			peers = append(peers, networkingv1.NetworkPolicyPeer{
+				IPBlock: &networkingv1.IPBlock{CIDR: ip + "/32"},
+			})
+		}
+		rules = append(rules, networkingv1.NetworkPolicyEgressRule{
+			Ports: []networkingv1.NetworkPolicyPort{{
+				Port:     netIntOrStr(443),
+				Protocol: netProtocolPtr(corev1.ProtocolTCP),
+			}},
+			To: peers,
+		})
+	}
+	return rules
 }
 
 // netIntOrStr builds the port value every NetworkPolicy rule uses.

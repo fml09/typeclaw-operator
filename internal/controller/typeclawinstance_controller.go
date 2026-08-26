@@ -102,15 +102,26 @@ func (r *TypeClawInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 		relayEnabled := instance.Spec.RestartRelay == nil || *instance.Spec.RestartRelay
 		if relayEnabled {
-			for _, obj := range []client.Object{
-				resources.RelayServiceAccount(&instance),
-				resources.RelayRole(&instance),
-				resources.RelayRoleBinding(&instance),
+			sa := resources.RelayServiceAccount(&instance)
+			role := resources.RelayRole(&instance)
+			binding := resources.RelayRoleBinding(&instance)
+			for _, item := range []struct {
+				obj   client.Object
+				mutat func()
+			}{
+				{sa, func() {}}, // ServiceAccount carries no mutable spec.
+				{role, func() { role.Rules = resources.RelayRole(&instance).Rules }},
+				{binding, func() {
+					desired := resources.RelayRoleBinding(&instance)
+					binding.RoleRef = desired.RoleRef
+					binding.Subjects = desired.Subjects
+				}},
 			} {
-				if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, obj, func() error {
-					return r.own(&instance, obj)
+				if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, item.obj, func() error {
+					item.mutat()
+					return r.own(&instance, item.obj)
 				}); err != nil {
-					return fmt.Errorf("apply relay RBAC %T: %w", obj, err)
+					return fmt.Errorf("apply relay RBAC %T: %w", item.obj, err)
 				}
 			}
 		} else if err := r.deleteRelayRBAC(ctx, &instance); err != nil {

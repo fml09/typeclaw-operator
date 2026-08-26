@@ -1,11 +1,13 @@
 // relay.go renders the restart relay attachment for one TypeClaw Instance:
 // the sidecar container running the /relay binary baked into the operator
 // image, plus the least-privilege Service Account, Role, and Role Binding it
-// needs to delete exactly its own Pod. The pod-level Restricted Workload
-// floor (run-as, fsGroup, seccomp, automountServiceAccountToken=false) is
-// owned by the StatefulSet pod template; this file never relaxes it. Cluster
-// authority reaches the sidecar exclusively through the projected
-// service-account token volume returned by RelayTokenVolume.
+// needs to delete exactly its own Pod and observe its own Instance's config.
+// The pod-level Restricted Workload floor (run-as, fsGroup, seccomp,
+// automountServiceAccountToken=false) is owned by the StatefulSet pod
+// template; this file never relaxes it. Cluster authority reaches the
+// sidecar exclusively through the projected service-account token volume
+// returned by RelayTokenVolume, verified against the namespace trust bundle
+// returned by RelayCAVolume.
 package resources
 
 import (
@@ -35,6 +37,14 @@ const (
 	// into the existing pod spec.
 	relayControlVolumeName = "managed-control"
 
+	// relayCAVolumeName carries the namespace trust bundle so the relay can
+	// verify the API server without pod-level token automounting.
+	relayCAVolumeName = "relay-ca"
+
+	// relayCAMountPath mirrors the conventional service-account CA location
+	// expected by client-go defaults.
+	relayCAMountPath = "/var/run/secrets/kubernetes.io/serviceaccount"
+
 	// relayTokenExpirationSeconds bounds the projected token lifetime; the
 	// kubelet rotates it automatically before expiry.
 	relayTokenExpirationSeconds = 86400
@@ -42,9 +52,11 @@ const (
 
 // RelaySidecar renders the restart relay sidecar. It watches the Managed
 // Control Dir for restart-request drops and deletes its own Pod when a valid
-// request arrives. The control-dir mount assumes the "managed-control" volume
-// already present in the Instance pod spec; callers add RelayTokenVolume to
-// the pod and insert this container last.
+// request arrives; when SelfConfig observation is enabled it also watches
+// typeclaw.json (ADR 0005). The control-dir mount assumes the
+// "managed-control" volume already present in the Instance pod spec; callers
+// add RelayTokenVolume and RelayCAVolume to the pod and insert this
+// container last.
 func RelaySidecar(runtimeID, controlDir, image string) corev1.Container {
 	return corev1.Container{
 		Name:            RelayContainerName,
@@ -73,6 +85,7 @@ func RelaySidecar(runtimeID, controlDir, image string) corev1.Container {
 			// SelfConfig observation reads typeclaw.json (ADR 0005);
 			// secrets files stay unreadable to the group by mode.
 			{Name: "agent-folder", MountPath: AgentMountPath, ReadOnly: true},
+			{Name: relayCAVolumeName, MountPath: relayCAMountPath, ReadOnly: true},
 		},
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: boolRef(false),
@@ -104,9 +117,9 @@ func RelayServiceAccount(instance *typeclawv1alpha1.TypeClawInstance) *corev1.Se
 }
 
 // RelayRole renders a namespace-scoped Role allowing the relay to delete
-// exactly its own StatefulSet Pod (<instance>-0) and, when SelfConfig
-// observation is on (ADR 0005), to fill the selfConfig block of its own
-// Instance status. Both grants are resourceNames-restricted; nothing else.
+// exactly its own StatefulSet Pod (<instance>-0) and, for SelfConfig
+// observation (ADR 0005), to read its own Instance and fill its selfConfig
+// status block. Every grant is resourceNames-restricted; nothing else.
 func RelayRole(instance *typeclawv1alpha1.TypeClawInstance) *rbacv1.Role {
 	return &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{
@@ -158,9 +171,9 @@ func RelayRoleBinding(instance *typeclawv1alpha1.TypeClawInstance) *rbacv1.RoleB
 	}
 }
 
-// RelayTokenVolume renders the projected service-account token volume for the
-// relay sidecar. Pod-level automount stays disabled; this projection is the
-// only channel carrying the relay identity into the Pod.
+// RelayTokenVolume renders the projected service-account token volume for
+// the relay sidecar. Pod-level automount stays disabled; this projection is
+// the only channel carrying the relay identity into the Pod.
 func RelayTokenVolume() corev1.Volume {
 	return corev1.Volume{
 		Name: RelayTokenVolumeName,
@@ -172,6 +185,26 @@ func RelayTokenVolume() corev1.Volume {
 						ExpirationSeconds: int64Ref(relayTokenExpirationSeconds),
 					},
 				}},
+			},
+		},
+	}
+}
+
+// RelayCAVolume mounts the auto-created kube-root-ca.crt ConfigMap so the
+// relay can verify the API server while service-account token automounting
+// stays disabled at the Pod level.
+func RelayCAVolume() corev1.Volume {
+	optional := false
+	return corev1.Volume{
+		Name: relayCAVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"},
+				Items: []corev1.KeyToPath{{
+					Key:  "ca.crt",
+					Path: "ca.crt",
+				}},
+				Optional: &optional,
 			},
 		},
 	}

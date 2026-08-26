@@ -135,6 +135,9 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return err
 	}
+	if err := typeclawv1alpha1.AddToScheme(scheme); err != nil {
+		return err
+	}
 	c, err := client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		return err

@@ -234,7 +234,7 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 			sts.Spec.Template.Spec.Containers,
 			RelaySidecar(runtimeID, ManagedControlDir, DefaultOperatorImage),
 		)
-		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, RelayTokenVolume())
+		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, RelayTokenVolume(), RelayCAVolume())
 	}
 	return sts, nil
 }
