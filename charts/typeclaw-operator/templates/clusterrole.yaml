@@ -112,3 +112,5 @@ rules:
     - patch
     - update
 {{- end }}
+
+# fresh render r2
