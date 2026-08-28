@@ -2,12 +2,14 @@ package relay
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
-	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
 )
 
 type recordingObserver struct {
@@ -38,21 +40,28 @@ func configWatcher(t *testing.T, dir string, policy []string) (*ConfigWatcher, *
 	in.Spec.SelfConfig = &typeclawv1alpha1.SelfConfigSpec{ProtectedPaths: policy}
 	obs := &recordingObserver{}
 	w := &ConfigWatcher{
-		Instance: in,
-		AgentDir: dir,
-		Observer: obs,
-		now:      func() time.Time { return time.Unix(1700000000, 0) },
+		Instance:        in,
+		ObservationFile: filepath.Join(dir, "observation.json"),
+		Observer:        obs,
+		now:             func() time.Time { return time.Unix(1700000000, 0) },
 	}
 	return w, obs, in
 }
 
 func writeConfig(t *testing.T, dir, content string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, "typeclaw.json"), []byte(content), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
+	sum := sha256.Sum256([]byte(content))
+	document, err := json.Marshal(ConfigObservationDocument{
+		Digest: hex.EncodeToString(sum[:]),
+		Values: topLevelValueDigests([]byte(content)),
+	})
+	if err != nil {
+		t.Fatalf("encode observation: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "observation.json"), document, 0o644); err != nil {
+		t.Fatalf("write observation: %v", err)
 	}
 }
-
 func TestConfigWatcherBaselineSeedsWithoutChangedPaths(t *testing.T) {
 	dir := t.TempDir()
 	writeConfig(t, dir, `{"channels":{},"sandbox":{}}`)
@@ -125,6 +134,33 @@ func TestConfigWatcherUnchangedContentEmitsNothing(t *testing.T) {
 	}
 	if len(obs.observations) != 1 {
 		t.Fatalf("identical content must dedupe to the baseline only, got %d", len(obs.observations))
+	}
+}
+
+func TestConfigWatcherRejectsRawObservationValues(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","values":{"token":"secret-value"}}`
+	if err := os.WriteFile(filepath.Join(dir, "observation.json"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w, _, _ := configWatcher(t, dir, nil)
+	if err := w.pollOnce(context.Background()); err == nil {
+		t.Fatal("observation channel must reject raw credential-shaped values")
+	}
+}
+func TestConfigWatcherRejectsObservationSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.json")
+	document := `{"digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","values":{}}`
+	if err := os.WriteFile(target, []byte(document), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "observation.json")); err != nil {
+		t.Fatal(err)
+	}
+	w, _, _ := configWatcher(t, dir, nil)
+	if err := w.pollOnce(context.Background()); err == nil {
+		t.Fatal("observation channel must reject symlink targets")
 	}
 }
 

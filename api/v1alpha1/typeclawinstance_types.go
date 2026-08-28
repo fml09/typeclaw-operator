@@ -20,20 +20,18 @@ type VolumeClaimSpec struct {
 	StorageClassName *string `json:"storageClassName,omitempty"`
 }
 
-// StorageSpec owns the durable volumes of a TypeClaw Instance. The Agent Folder
-// and the runtime home are separate single-writer volumes so credential state
-// never collapses into the Agent Folder boundary.
+// StorageSpec owns the durable volumes of a TypeClaw Instance. Credential
+// bytes for Opaque Credential Use are never sourced from these volumes.
 type StorageSpec struct {
-	// AgentFolder provisions the PVC carrying the complete Agent Folder:
-	// authored config, Git history, sessions, memory, workspace, and the
-	// writable secrets envelope.
+	// AgentFolder provisions the PVC carrying authored configuration, Git
+	// history, sessions, memory, and the public workspace. Kubernetes Secret
+	// projections are never attached to this mount.
 	// +kubebuilder:default={size: "5Gi"}
 	AgentFolder VolumeClaimSpec `json:"agentFolder"`
 
-	// RuntimeHome provisions the durable /home/typeclaw volume holding local
-	// CLI credentials and channel encryption keys. Leaving it unset attaches
-	// an emptyDir instead, which loses those secrets on Pod replacement; only
-	// accept that tradeoff for throwaway Instances.
+	// RuntimeHome provisions optional runtime-owned state at /home/typeclaw.
+	// The operator never populates it from a Kubernetes Secret; credential
+	// operations use an out-of-process Credential Runner instead.
 	// +optional
 	RuntimeHome *VolumeClaimSpec `json:"runtimeHome,omitempty"`
 
@@ -46,15 +44,14 @@ type StorageSpec struct {
 	OnInstanceDeletion string `json:"onInstanceDeletion,omitempty"`
 }
 
-// BackupSpec configures scheduled filesystem snapshots of the Agent Folder.
-// Snapshots are quiesced by scaling the workload to zero for the copy and
-// restoring it afterwards.
+// BackupSpec configures scheduled snapshots of the public Agent Folder
+// workspace. Credential files are outside this artifact by construction.
 type BackupSpec struct {
 	// Cron schedule (standard five-field crontab) driving snapshot Jobs.
 	Schedule string `json:"schedule"`
 
-	// SnapshotVolume provisions the destination volume receiving tar
-	// snapshots of the Agent Folder.
+	// SnapshotVolume provisions the destination volume receiving public
+	// workspace snapshots.
 	// +kubebuilder:default={size: "10Gi"}
 	SnapshotVolume VolumeClaimSpec `json:"snapshotVolume"`
 
@@ -132,8 +129,9 @@ type RuntimeSpec struct {
 }
 
 // TypeClawInstanceSpec declares the operational policy the operator enforces
-// for one TypeClaw Instance. Runtime-owned state (sessions, Git history,
-// refreshed credentials) never lives here; it lives in the Agent Folder.
+// for one TypeClaw Instance. Runtime-owned non-credential state (sessions,
+// Git history, and memory) lives in the Agent Folder; Opaque Credential Use is
+// declared separately through CredentialPolicy.
 type TypeClawInstanceSpec struct {
 	// Runtime selects the managed runtime image.
 	// +optional
@@ -183,6 +181,12 @@ type TypeClawInstanceSpec struct {
 	// (ADR 0005). Unset means the Agent Folder stays opaque.
 	// +optional
 	SelfConfig *SelfConfigSpec `json:"selfConfig,omitempty"`
+
+	// CredentialPolicy declares the only credential that Credential Runners
+	// may use for this Instance. The Managed Runtime never receives this
+	// reference or a Secret projection.
+	// +optional
+	CredentialPolicy *CredentialPolicySpec `json:"credentialPolicy,omitempty"`
 }
 
 // SecuritySpec declares workload security-envelope selections. Anything

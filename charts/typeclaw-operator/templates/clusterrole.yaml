@@ -120,6 +120,39 @@ rules:
     - get
     - patch
     - update
+  - apiGroups:
+    - ""
+    resources:
+    - secrets
+    verbs:
+    - get
+  - apiGroups:
+    - typeclaw.fml09.io
+    resources:
+    - credentialrequests
+    verbs:
+    - create
+    - get
+    - list
+    - patch
+    - update
+    - watch
+  - apiGroups:
+    - typeclaw.fml09.io
+    resources:
+    - credentialapprovals
+    verbs:
+    - get
+    - list
+    - watch
+  - apiGroups:
+    - typeclaw.fml09.io
+    resources:
+    - credentialrequests/status
+    verbs:
+    - get
+    - patch
+    - update
 {{- end }}
 
 # fresh render r2

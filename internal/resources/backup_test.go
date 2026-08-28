@@ -96,8 +96,13 @@ func TestBackupCronJobScriptAndMounts(t *testing.T) {
 
 	cmd := cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Command
 	script := cmd[len(cmd)-1]
-	if !strings.Contains(script, `tar czf "/snapshots/${JOB_NAME}.tar.gz" -C /agent .`) {
-		t.Fatalf("script missing archive step:\n%s", script)
+	if !strings.Contains(script, `-C /workspace .`) {
+		t.Fatalf("script missing public workspace archive step:\n%s", script)
+	}
+	for _, excluded := range []string{".env", "secrets.json", "auth.json"} {
+		if !strings.Contains(script, "--exclude='./"+excluded+"'") || !strings.Contains(script, "--exclude='*/"+excluded+"'") {
+			t.Fatalf("script must exclude %s at root and nested paths:\n%s", excluded, script)
+		}
 	}
 	if !strings.Contains(script, `tail -n +$((RETENTION+1))`) {
 		t.Fatalf("script missing retention pruning:\n%s", script)
@@ -123,14 +128,16 @@ func TestBackupCronJobScriptAndMounts(t *testing.T) {
 	if jobName == "" {
 		t.Fatal("JOB_NAME env missing")
 	}
-
 	mounts := map[string]corev1.VolumeMount{}
 	for _, m := range container.VolumeMounts {
 		mounts[m.MountPath] = m
 	}
-	agent, ok := mounts["/agent"]
-	if !ok || !agent.ReadOnly {
-		t.Fatalf("/agent mount = %+v, want read-only", agent)
+	workspace, ok := mounts[PublicWorkspaceMountPath]
+	if !ok || !workspace.ReadOnly || workspace.SubPath != publicWorkspaceSubPath {
+		t.Fatalf("public workspace mount = %+v, want read-only SubPath %q", workspace, publicWorkspaceSubPath)
+	}
+	if _, found := mounts[AgentMountPath]; found {
+		t.Fatalf("backup must not mount the Agent Folder root")
 	}
 	snapshots, ok := mounts["/snapshots"]
 	if !ok || snapshots.ReadOnly {
@@ -170,22 +177,22 @@ func TestRestoreJobGuardsNonEmptyTarget(t *testing.T) {
 
 	cmd := job.Spec.Template.Spec.Containers[0].Command
 	script := cmd[len(cmd)-1]
-	if !strings.Contains(script, `[ ! -e /agent/typeclaw.json ] ||`) || !strings.Contains(script, "exit 78") {
-		t.Fatalf("script missing empty-target guard:\n%s", script)
+	if !strings.Contains(script, "public workspace target not empty") || !strings.Contains(script, "exit 78") {
+		t.Fatalf("script missing empty-workspace guard:\n%s", script)
 	}
-	if !strings.Contains(script, `tar xzf "/snapshots/kakao-agent-backup-12345.tar.gz" -C /agent`) {
-		t.Fatalf("script missing unpack of requested archive:\n%s", script)
+	if !strings.Contains(script, `tar xzf '/snapshots/kakao-agent-backup-12345.tar.gz'`) ||
+		!strings.Contains(script, `-C '/workspace'`) {
+		t.Fatalf("script missing unpack of requested public workspace archive:\n%s", script)
 	}
-
-	var agent corev1.VolumeMount
+	var workspace corev1.VolumeMount
 	found := false
 	for _, m := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
-		if m.MountPath == "/agent" {
-			agent, found = m, true
+		if m.MountPath == PublicWorkspaceMountPath {
+			workspace, found = m, true
 		}
 	}
-	if !found || agent.ReadOnly {
-		t.Fatalf("/agent mount = %+v, want read-write for restore", agent)
+	if !found || workspace.ReadOnly || workspace.SubPath != publicWorkspaceSubPath {
+		t.Fatalf("public workspace mount = %+v, want read-write SubPath %q", workspace, publicWorkspaceSubPath)
 	}
 	assertRestrictedFloor(t, job.Spec.Template.Spec)
 }

@@ -31,13 +31,12 @@ const (
 	reasonRestoreBlockedSuspended = "RestoreBlockedSuspended"
 	reasonRestoreTargetNotEmpty   = "RestoreTargetNotEmpty"
 
-	// RestoreAnnotation carries the snapshot archive to unpack onto the
-	// Agent Folder; it is processed exactly once per distinct value.
+	// RestoreAnnotation carries the public workspace snapshot archive to
+	// unpack; it is processed exactly once per distinct value.
 	RestoreAnnotation = "typeclaw.fml09.io/restore"
 
-	// restoreTargetNotEmptyExit is the custom exit code the restore script
-	// uses when /agent/typeclaw.json already exists (target not empty); the
-	// Job surfaces it inside the JobFailed condition message.
+	// uses when the public workspace target is non-empty; the Job surfaces it
+	// inside the JobFailed condition message.
 	restoreTargetNotEmptyExit = "exit code 78"
 
 	// backupComponentLabelKey selects snapshot Jobs spawned by the backup
@@ -248,7 +247,7 @@ func (r *BackupController) processRestore(ctx context.Context, instance *typecla
 	if backupJobFailedWithExitCode(&job, restoreTargetNotEmptyExit) {
 		setCondition(status, instance.Generation, ConditionBackupReady,
 			false, reasonRestoreTargetNotEmpty, reasonRestoreTargetNotEmpty,
-			fmt.Sprintf("restore of %q aborted: Agent Folder target not empty (%s)",
+			fmt.Sprintf("restore of %q aborted: public workspace target not empty (%s)",
 				value, restoreTargetNotEmptyExit))
 	}
 	return nil

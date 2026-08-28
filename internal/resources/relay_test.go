@@ -45,6 +45,13 @@ func TestRelaySidecarEncodesContract(t *testing.T) {
 	if control.MountPath != "/run/typeclaw-managed" || control.ReadOnly {
 		t.Fatalf("control dir mount = %+v", control)
 	}
+	observation := mounts[SelfConfigObservationVolumeName]
+	if observation.MountPath != SelfConfigObservationDir || !observation.ReadOnly {
+		t.Fatalf("observation mount = %+v, want read-only dedicated observation path", observation)
+	}
+	if _, found := mounts[AgentMountPath]; found {
+		t.Fatalf("relay must not mount the Agent Folder")
+	}
 	sc := c.SecurityContext
 	if sc == nil ||
 		sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation ||

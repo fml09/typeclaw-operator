@@ -299,7 +299,7 @@ func TestRestoreTargetNotEmptySurfacesExitCode78(t *testing.T) {
 	failed.Status.Conditions = append(failed.Status.Conditions, batchv1.JobCondition{
 		Type:    batchv1.JobFailed,
 		Status:  corev1.ConditionTrue,
-		Message: `Job has reached the specified backoff limit: restore aborted: Agent Folder target not empty (exit code 78)`,
+		Message: `Job has reached the specified backoff limit: restore aborted: public workspace target not empty (exit code 78)`,
 	})
 
 	r, _ := backupReconcilerFor(t, in, failed)

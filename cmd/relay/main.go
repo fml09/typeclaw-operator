@@ -171,14 +171,18 @@ func run(ctx context.Context, log *slog.Logger) error {
 
 	if instance.Spec.SelfConfig != nil {
 		go func() {
+			observationFile := envOr(
+				"TYPECLAW_SELF_CONFIG_OBSERVATION_FILE",
+				resources.SelfConfigObservationFile,
+			)
 			cw := &relay.ConfigWatcher{
-				Instance: instance,
-				AgentDir: resources.AgentMountPath,
-				Interval: interval,
-				Observer: clientConfigObserver{c},
-				Log:      log,
+				Instance:        instance,
+				ObservationFile: observationFile,
+				Interval:        interval,
+				Observer:        clientConfigObserver{c},
+				Log:             log,
 			}
-			log.Info("selfconfig observation watching", "agentDir", resources.AgentMountPath)
+			log.Info("selfconfig observation watching", "observationFile", observationFile)
 			errCh <- cw.Run(ctx)
 		}()
 	}

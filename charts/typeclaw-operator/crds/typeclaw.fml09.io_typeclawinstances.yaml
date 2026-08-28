@@ -57,8 +57,9 @@ spec:
           spec:
             description: |-
               TypeClawInstanceSpec declares the operational policy the operator enforces
-              for one TypeClaw Instance. Runtime-owned state (sessions, Git history,
-              refreshed credentials) never lives here; it lives in the Agent Folder.
+              for one TypeClaw Instance. Runtime-owned non-credential state (sessions,
+              Git history, and memory) lives in the Agent Folder; Opaque Credential Use is
+              declared separately through CredentialPolicy.
             properties:
               autoUpdate:
                 description: AutoUpdate manages managed-runtime rollouts from registry
@@ -113,8 +114,8 @@ spec:
                     default:
                       size: 10Gi
                     description: |-
-                      SnapshotVolume provisions the destination volume receiving tar
-                      snapshots of the Agent Folder.
+                      SnapshotVolume provisions the destination volume receiving public
+                      workspace snapshots.
                     properties:
                       size:
                         anyOf:
@@ -134,6 +135,104 @@ spec:
                 required:
                 - schedule
                 - snapshotVolume
+                type: object
+              credentialPolicy:
+                description: |-
+                  CredentialPolicy declares the only credential that Credential Runners
+                  may use for this Instance. The Managed Runtime never receives this
+                  reference or a Secret projection.
+                properties:
+                  allowBypass:
+                    description: |-
+                      AllowBypass is the independent administrator gate for Bypass mode.
+                      Without it, a consumer declaring Bypass is denied.
+                    type: boolean
+                  consumers:
+                    description: Consumers is the complete administrator allow-list.
+                    items:
+                      description: |-
+                        CredentialConsumerSpec is an administrator-declared use of one credential.
+                        It is an allow-list, not a plugin identity or a place to put secret bytes.
+                      properties:
+                        accessMode:
+                          description: AccessMode selects the administrator policy
+                            for this consumer.
+                          enum:
+                          - Deny
+                          - Confirm
+                          - PreAuthorized
+                          - Bypass
+                          type: string
+                        allowedRepositories:
+                          description: |-
+                            AllowedRepositories is an exact repository allow-list for GitHub
+                            operations. Empty means no repository is authorized.
+                          items:
+                            type: string
+                          type: array
+                        name:
+                          description: Name identifies the approved consumer, for
+                            example github.
+                          minLength: 1
+                          pattern: ^[a-z][a-z0-9.-]*$
+                          type: string
+                        operations:
+                          description: Operations are exact typed operation identifiers.
+                          items:
+                            description: |-
+                              CredentialOperation identifies a protocol-specific, typed operation. The
+                              operator deliberately exposes no generic shell, URL, or header operation.
+                            type: string
+                          minItems: 1
+                          type: array
+                      required:
+                      - accessMode
+                      - name
+                      - operations
+                      type: object
+                    minItems: 1
+                    type: array
+                  secret:
+                    description: |-
+                      CredentialSecretRef binds a policy to one administrator-created immutable
+                      Secret. The operator reads only Secret metadata; it never reads Secret.Data.
+                    properties:
+                      immutable:
+                        description: |-
+                          Immutable must be true. Mutable name-only Secret projection is not a
+                          supported credential binding.
+                        type: boolean
+                      key:
+                        description: Key is the only key projected into a Credential
+                          Runner.
+                        minLength: 1
+                        pattern: ^[A-Za-z0-9._-]+$
+                        type: string
+                      name:
+                        description: Name is the immutable Secret name in the TypeClaw
+                          Instance namespace.
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      resourceVersion:
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: |-
+                          UID and ResourceVersion bind the request to the exact Secret identity
+                          observed by the controller before the Runner is created.
+                        minLength: 1
+                        type: string
+                    required:
+                    - immutable
+                    - key
+                    - name
+                    - resourceVersion
+                    - uid
+                    type: object
+                required:
+                - consumers
+                - secret
                 type: object
               exposeTUI:
                 description: |-
@@ -231,9 +330,9 @@ spec:
                     default:
                       size: 5Gi
                     description: |-
-                      AgentFolder provisions the PVC carrying the complete Agent Folder:
-                      authored config, Git history, sessions, memory, workspace, and the
-                      writable secrets envelope.
+                      AgentFolder provisions the PVC carrying authored configuration, Git
+                      history, sessions, memory, and the public workspace. Kubernetes Secret
+                      projections are never attached to this mount.
                     properties:
                       size:
                         anyOf:
@@ -262,10 +361,9 @@ spec:
                     type: string
                   runtimeHome:
                     description: |-
-                      RuntimeHome provisions the durable /home/typeclaw volume holding local
-                      CLI credentials and channel encryption keys. Leaving it unset attaches
-                      an emptyDir instead, which loses those secrets on Pod replacement; only
-                      accept that tradeoff for throwaway Instances.
+                      RuntimeHome provisions optional runtime-owned state at /home/typeclaw.
+                      The operator never populates it from a Kubernetes Secret; credential
+                      operations use an out-of-process Credential Runner instead.
                     properties:
                       size:
                         anyOf:

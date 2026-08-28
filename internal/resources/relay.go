@@ -52,11 +52,11 @@ const (
 
 // RelaySidecar renders the restart relay sidecar. It watches the Managed
 // Control Dir for restart-request drops and deletes its own Pod when a valid
-// request arrives; when SelfConfig observation is enabled it also watches
-// typeclaw.json (ADR 0005). The control-dir mount assumes the
+// request arrives. SelfConfig observation consumes a sanitized observation
+// document from the dedicated runtime-to-relay volume (ADR 0005); it never
+// mounts or traverses the Agent Folder. The control-dir mount assumes the
 // "managed-control" volume already present in the Instance pod spec; callers
-// add RelayTokenVolume and RelayCAVolume to the pod and insert this
-// container last.
+// add RelayTokenVolume, RelayCAVolume, and the observation volume to the pod.
 func RelaySidecar(runtimeID, controlDir, image string) corev1.Container {
 	return corev1.Container{
 		Name:            RelayContainerName,
@@ -66,6 +66,7 @@ func RelaySidecar(runtimeID, controlDir, image string) corev1.Container {
 		Env: []corev1.EnvVar{
 			{Name: "TYPECLAW_MANAGED_CONTROL_DIR", Value: controlDir},
 			{Name: "TYPECLAW_RUNTIME_ID", Value: runtimeID},
+			{Name: "TYPECLAW_SELF_CONFIG_OBSERVATION_FILE", Value: SelfConfigObservationFile},
 			{
 				Name: "POD_NAME",
 				ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
@@ -82,9 +83,7 @@ func RelaySidecar(runtimeID, controlDir, image string) corev1.Container {
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: relayControlVolumeName, MountPath: controlDir},
 			{Name: RelayTokenVolumeName, MountPath: RelayTokenMountPath, ReadOnly: true},
-			// SelfConfig observation reads typeclaw.json (ADR 0005);
-			// secrets files stay unreadable to the group by mode.
-			{Name: "agent-folder", MountPath: AgentMountPath, ReadOnly: true},
+			{Name: SelfConfigObservationVolumeName, MountPath: SelfConfigObservationDir, ReadOnly: true},
 			{Name: relayCAVolumeName, MountPath: relayCAMountPath, ReadOnly: true},
 		},
 		SecurityContext: &corev1.SecurityContext{

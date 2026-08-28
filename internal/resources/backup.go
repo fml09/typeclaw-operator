@@ -8,11 +8,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"strconv"
-
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"strconv"
+	"strings"
 
 	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
 )
@@ -29,6 +29,13 @@ const SnapshotsMountPath = "/snapshots"
 // the key used by the BackupController's Job selector; the pair is kept in
 // lockstep by backup_cronjob_test.go and backup_controller_test.go.
 const componentLabelKey = "app.kubernetes.io/component"
+
+// PublicWorkspaceMountPath is the only Agent Folder subtree visible to a
+// backup workload. Mounting it with SubPath prevents backup code from opening
+// sibling credential files even when the source PVC contains them.
+const PublicWorkspaceMountPath = "/workspace"
+
+const publicWorkspaceSubPath = "workspace"
 
 // backupComponent is the component value shared by the snapshot CronJob and
 // every snapshot Job it spawns.
@@ -52,8 +59,8 @@ func RestoreJobName(instanceName, snapshotArchive string) string {
 	return fmt.Sprintf("%s-restore-%s", instanceName, hex.EncodeToString(sum[:4]))
 }
 
-// SnapshotPVC renders the destination volume receiving tar snapshots of the
-// Agent Folder, sized by spec.backup.snapshotVolume.
+// SnapshotPVC renders the destination volume receiving public workspace
+// snapshots, sized by spec.backup.snapshotVolume.
 func SnapshotPVC(instance *typeclawv1alpha1.TypeClawInstance) *corev1.PersistentVolumeClaim {
 	claim := claimTemplate(SnapshotPVCName(instance.Name), instance.Spec.Backup.SnapshotVolume)
 	claim.Namespace = instance.Namespace
@@ -62,9 +69,9 @@ func SnapshotPVC(instance *typeclawv1alpha1.TypeClawInstance) *corev1.Persistent
 }
 
 // BackupCronJob renders the scheduled snapshot driver: one busybox Job per
-// tick that tars the Agent Folder and prunes snapshots beyond retention.
-// spec.suspend mirrors the Instance so suspending an Instance also pauses
-// snapshots while the runtime is scaled to zero.
+// tick that tars only the public Agent Folder workspace and prunes snapshots
+// beyond retention. spec.suspend mirrors the Instance so suspending an
+// Instance also pauses snapshots while the runtime is scaled to zero.
 func BackupCronJob(instance *typeclawv1alpha1.TypeClawInstance) *batchv1.CronJob {
 	labels := Labels(instance)
 	labels[componentLabelKey] = backupComponent
@@ -105,19 +112,35 @@ func BackupCronJob(instance *typeclawv1alpha1.TypeClawInstance) *batchv1.CronJob
 	}
 }
 
-// backupScript archives the read-only Agent Folder under the spawning
-// Job's name, then prunes oldest archives beyond RETENTION.
-const backupScript = `tar czf "/snapshots/${JOB_NAME}.tar.gz" -C /agent .
+// backupScript archives only the public workspace under the spawning Job's
+// name, then prunes oldest archives beyond RETENTION. The excludes apply to
+// both the workspace root and nested directories.
+const backupScript = `tar czf "/snapshots/${JOB_NAME}.tar.gz" \
+  --exclude='./.env' --exclude='./secrets.json' --exclude='./auth.json' \
+  --exclude='*/.env' --exclude='*/secrets.json' --exclude='*/auth.json' \
+  -C /workspace .
 ls -1t /snapshots/*.tar.gz | tail -n +$((RETENTION+1)) | xargs -r rm -f`
 
-// RestoreJob renders the one-shot Job unpacking a snapshot archive onto the
-// Agent Folder. The guard exits with custom code 78 when the target already
-// holds a runtime configuration, so a restore can never silently overwrite
-// a live Agent Folder; the controller surfaces that exit code separately.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func restoreArchivePath(snapshotArchive string) string {
+	if snapshotArchive == "" || strings.ContainsAny(snapshotArchive, `/\\`) {
+		return shellQuote(SnapshotsMountPath + "/invalid-archive")
+	}
+	return shellQuote(SnapshotsMountPath + "/" + snapshotArchive)
+}
+
+// RestoreJob renders the one-shot Job unpacking a public workspace snapshot
+// into the public workspace subtree. The guard exits with custom code 78 when
+// the target is non-empty, so a restore can never silently overwrite a live
+// workspace; the controller surfaces that exit code separately.
 func RestoreJob(instance *typeclawv1alpha1.TypeClawInstance, snapshotArchive string) *batchv1.Job {
 
-	script := fmt.Sprintf(`[ ! -e %[2]s/typeclaw.json ] || { echo "restore aborted: Agent Folder target not empty (exit code 78)" >&2; exit 78; }
-tar xzf "/snapshots/%[1]s" -C %[2]s`, snapshotArchive, AgentMountPath)
+	restorePath := shellQuote(PublicWorkspaceMountPath)
+	script := fmt.Sprintf(`[ -z "$(ls -A %s 2>/dev/null)" ] || { echo "restore aborted: public workspace target not empty (exit code 78)" >&2; exit 78; }
+tar xzf %s --exclude='./.env' --exclude='./secrets.json' --exclude='./auth.json' --exclude='*/.env' --exclude='*/secrets.json' --exclude='*/auth.json' -C %s`, restorePath, restoreArchivePath(snapshotArchive), restorePath)
 	labels := Labels(instance)
 	labels[componentLabelKey] = "restore"
 
@@ -139,8 +162,10 @@ tar xzf "/snapshots/%[1]s" -C %[2]s`, snapshotArchive, AgentMountPath)
 // backupPodSpec renders the Restricted Workload floor shared by every
 // backup-capable workload (ADR 0001): fixed non-root identity 65532, the
 // administrator-installed Localhost seccomp profile, no privilege
-// escalation, all capabilities dropped, and no API-server token. The agent
-// folder claim follows the StatefulSet's volumeClaimTemplate naming
+// escalation, all capabilities dropped, and no API-server token. The Agent
+// Folder PVC is mounted only at its public workspace SubPath; credential
+// siblings are not visible to the backup process.
+// The source claim follows the StatefulSet's volumeClaimTemplate naming
 // (<template>-<instance>-0 = agent-folder-<instance>-0).
 func backupPodSpec(
 	instance *typeclawv1alpha1.TypeClawInstance,
@@ -174,7 +199,12 @@ func backupPodSpec(
 				},
 			},
 			VolumeMounts: []corev1.VolumeMount{
-				{Name: "agent-folder", MountPath: AgentMountPath, ReadOnly: agentReadOnly},
+				{
+					Name:      "agent-folder",
+					MountPath: PublicWorkspaceMountPath,
+					SubPath:   publicWorkspaceSubPath,
+					ReadOnly:  agentReadOnly,
+				},
 				{Name: "snapshots", MountPath: SnapshotsMountPath},
 			},
 		}},

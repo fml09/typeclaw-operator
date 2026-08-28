@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
+	"github.com/fml09/typeclaw-operator/internal/credential"
 )
 
 const (
@@ -32,11 +33,22 @@ const (
 	// runtime spool contract.
 	ManagedControlDir = "/run/typeclaw-managed"
 
+	// SelfConfigObservationDir is a runtime-to-relay channel containing only
+	// digests and changed-key metadata. It is never a view of the Agent Folder.
+	SelfConfigObservationDir = "/run/typeclaw-selfconfig"
+
+	// SelfConfigObservationFile is the sanitized observation document emitted
+	// by the Managed Runtime for the relay (ADR 0005).
+	SelfConfigObservationFile = SelfConfigObservationDir + "/observation.json"
+
+	// SelfConfigObservationVolumeName is the dedicated emptyDir carrying the
+	// sanitized SelfConfig observation document.
+	SelfConfigObservationVolumeName = "selfconfig-observation"
+
 	// AgentMountPath carries the complete Agent Folder.
 	AgentMountPath = "/agent"
 
-	// RuntimeHomeMountPath holds local CLI credentials and channel
-	// encryption keys outside the Agent Folder boundary.
+	// RuntimeHomeMountPath holds local runtime state outside the Agent Folder.
 	RuntimeHomeMountPath = "/home/typeclaw"
 
 	// DefaultRuntimeRepository pairs with spec.runtime.version (ADR 0003).
@@ -117,6 +129,10 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
 		{
+			Name:         SelfConfigObservationVolumeName,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		},
+		{
 			Name: "runtime-tmp",
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
 				Medium:    corev1.StorageMediumMemory,
@@ -134,6 +150,7 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 	mounts := []corev1.VolumeMount{
 		{Name: "agent-folder", MountPath: AgentMountPath},
 		{Name: "managed-control", MountPath: ManagedControlDir},
+		{Name: SelfConfigObservationVolumeName, MountPath: SelfConfigObservationDir},
 		{Name: "runtime-tmp", MountPath: "/tmp"},
 		{Name: "browser-shm", MountPath: "/dev/shm"},
 	}
@@ -148,6 +165,19 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 		})
 		mounts = append(mounts, corev1.VolumeMount{Name: "runtime-home", MountPath: RuntimeHomeMountPath})
 	}
+	if instance.Spec.CredentialPolicy != nil {
+		readOnly := true
+		volumes = append(volumes, corev1.Volume{
+			Name: credential.RunnerSPIFFEVolumeName,
+			VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
+				Driver:   "csi.spiffe.io",
+				ReadOnly: &readOnly,
+			}},
+		})
+		mounts = append(mounts, corev1.VolumeMount{
+			Name: credential.RunnerSPIFFEVolumeName, MountPath: credential.RunnerSPIFFEMountPath, ReadOnly: true,
+		})
+	}
 
 	relayEnabled := instance.Spec.RestartRelay == nil || *instance.Spec.RestartRelay
 	runtimeID := fmt.Sprintf("%s/%s", instance.Namespace, instance.Name)
@@ -158,12 +188,18 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 	}
 
 	runtimeEnv := []corev1.EnvVar{
+		{Name: "TYPECLAW_SELF_CONFIG_OBSERVATION_FILE", Value: SelfConfigObservationFile},
 		{Name: "TYPECLAW_DEPLOYMENT_PROFILE", Value: "managed"},
 		{Name: "TYPECLAW_RUNTIME_ID", Value: fmt.Sprintf("%s/%s", instance.Namespace, instance.Name)},
 		{Name: "TYPECLAW_MANAGED_CONTROL_DIR", Value: ManagedControlDir},
 	}
 	if timezone := instance.Spec.Runtime.Timezone; timezone != "" {
 		runtimeEnv = append(runtimeEnv, corev1.EnvVar{Name: "TZ", Value: timezone})
+	}
+	if instance.Spec.CredentialPolicy != nil {
+		runtimeEnv = append(runtimeEnv, corev1.EnvVar{
+			Name: "SPIFFE_ENDPOINT_SOCKET", Value: credential.RunnerSPIFFEEndpoint,
+		})
 	}
 
 	sts := &appsv1.StatefulSet{

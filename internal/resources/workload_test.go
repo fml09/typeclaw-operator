@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
+	"github.com/fml09/typeclaw-operator/internal/credential"
 )
 
 func instance(name string, mutate func(*typeclawv1alpha1.TypeClawInstance)) *typeclawv1alpha1.TypeClawInstance {
@@ -104,6 +105,29 @@ func TestStatefulSetEncodesManagedRuntimeContract(t *testing.T) {
 	if env["TYPECLAW_MANAGED_CONTROL_DIR"] != ManagedControlDir {
 		t.Errorf("control dir env wrong, got %q", env["TYPECLAW_MANAGED_CONTROL_DIR"])
 	}
+	if env["TYPECLAW_SELF_CONFIG_OBSERVATION_FILE"] != SelfConfigObservationFile {
+		t.Errorf("self-config observation path wrong, got %q", env["TYPECLAW_SELF_CONFIG_OBSERVATION_FILE"])
+	}
+	if len(runtime.EnvFrom) != 0 {
+		t.Fatalf("Managed Runtime must not import Secret env vars: %+v", runtime.EnvFrom)
+	}
+	for _, envVar := range runtime.Env {
+		if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
+			t.Fatalf("Managed Runtime must not project Secret env var %q", envVar.Name)
+		}
+	}
+	for _, volume := range pod.Volumes {
+		if volume.Secret != nil {
+			t.Fatalf("Managed Runtime Pod must not project a Kubernetes Secret: %s", volume.Name)
+		}
+		if volume.Projected != nil {
+			for _, source := range volume.Projected.Sources {
+				if source.Secret != nil {
+					t.Fatalf("Managed Runtime Pod must not project a Kubernetes Secret: %s", volume.Name)
+				}
+			}
+		}
+	}
 	if _, ok := env["TZ"]; ok {
 		t.Errorf("unset runtime timezone must not add TZ, got %q", env["TZ"])
 	}
@@ -113,6 +137,38 @@ func TestStatefulSetEncodesManagedRuntimeContract(t *testing.T) {
 	}
 	if p := runtime.ReadinessProbe.HTTPGet; p.Path != "/health/ready" || p.Port.IntValue() != ContainerPort {
 		t.Errorf("readiness probe must target /health/ready on %d, got %+v", ContainerPort, p)
+	}
+}
+func TestStatefulSetCredentialsRequireSPIFFEWorkloadAPI(t *testing.T) {
+	in := instance("credential-agent", func(in *typeclawv1alpha1.TypeClawInstance) {
+		in.Spec.CredentialPolicy = &typeclawv1alpha1.CredentialPolicySpec{}
+	})
+	sts, err := StatefulSet(in)
+	if err != nil {
+		t.Fatalf("StatefulSet() error: %v", err)
+	}
+	pod := sts.Spec.Template.Spec
+	var foundVolume bool
+	for _, volume := range pod.Volumes {
+		if volume.Name == credential.RunnerSPIFFEVolumeName {
+			foundVolume = volume.CSI != nil && volume.CSI.Driver == "csi.spiffe.io" &&
+				volume.CSI.ReadOnly != nil && *volume.CSI.ReadOnly
+		}
+	}
+	if !foundVolume {
+		t.Fatalf("credential-enabled runtime must require SPIFFE CSI volume: %+v", pod.Volumes)
+	}
+	env := map[string]string{}
+	for _, value := range pod.Containers[0].Env {
+		env[value.Name] = value.Value
+	}
+	if env["SPIFFE_ENDPOINT_SOCKET"] != credential.RunnerSPIFFEEndpoint {
+		t.Fatalf("credential-enabled runtime SPIFFE endpoint = %q", env["SPIFFE_ENDPOINT_SOCKET"])
+	}
+	for _, volume := range pod.Volumes {
+		if volume.Secret != nil {
+			t.Fatalf("credential-enabled runtime must still have no Secret volume: %s", volume.Name)
+		}
 	}
 }
 
@@ -181,11 +237,15 @@ func TestStatefulSetVolumesAndMounts(t *testing.T) {
 		}
 	}
 
-	tmpVol := pod.Volumes[1]
+	volumes := map[string]corev1.Volume{}
+	for _, volume := range pod.Volumes {
+		volumes[volume.Name] = volume
+	}
+	tmpVol := volumes["runtime-tmp"]
 	if tmpVol.EmptyDir == nil || tmpVol.EmptyDir.Medium != corev1.StorageMediumMemory || tmpVol.EmptyDir.SizeLimit.IsZero() {
 		t.Errorf("/tmp must be sized memory-backed emptyDir for Xvfb, got %+v", tmpVol)
 	}
-	shmVol := pod.Volumes[2]
+	shmVol := volumes["browser-shm"]
 	if shmVol.EmptyDir == nil || shmVol.EmptyDir.SizeLimit.Cmp(resource.MustParse("512Mi")) != 0 {
 		t.Errorf("browser shared memory must stay at 512Mi limit, got %+v", shmVol)
 	}

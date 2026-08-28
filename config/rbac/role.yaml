@@ -34,6 +34,21 @@ rules:
   - update
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+- apiGroups:
   - apps
   resources:
   - statefulsets
@@ -86,6 +101,34 @@ rules:
 - apiGroups:
   - typeclaw.fml09.io
   resources:
+  - credentialapprovals
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - typeclaw.fml09.io
+  resources:
+  - credentialrequests
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - typeclaw.fml09.io
+  resources:
+  - credentialrequests/status
+  - typeclawinstances/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - typeclaw.fml09.io
+  resources:
   - typeclawinstances
   verbs:
   - create
@@ -100,12 +143,4 @@ rules:
   resources:
   - typeclawinstances/finalizers
   verbs:
-  - update
-- apiGroups:
-  - typeclaw.fml09.io
-  resources:
-  - typeclawinstances/status
-  verbs:
-  - get
-  - patch
   - update

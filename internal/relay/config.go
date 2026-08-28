@@ -1,26 +1,40 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"sort"
+	"syscall"
 	"time"
 
 	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
 )
 
-// ConfigObservation is one sighting of typeclaw.json state, ready to be
-// persisted into status.selfConfig.
+// ConfigObservation is one sanitized sighting of a TypeClaw configuration,
+// ready to be persisted into status.selfConfig. It contains no configuration
+// values; only a full-document digest and per-top-level-key digests cross the
+// runtime-to-relay boundary.
 type ConfigObservation struct {
 	Digest             string
 	At                 time.Time
 	Revision           int64
 	ChangedPaths       []string
 	ProtectedViolation bool
+}
+
+// ConfigObservationDocument is the file contract emitted by the Managed
+// Runtime. Values are digests, never the raw typeclaw.json values.
+type ConfigObservationDocument struct {
+	Digest string            `json:"digest"`
+	Values map[string]string `json:"values"`
 }
 
 // ConfigObserver is the cluster seam of the config watcher. Implementations
@@ -31,17 +45,18 @@ type ConfigObserver interface {
 	Observe(ctx context.Context, in *typeclawv1alpha1.TypeClawInstance, obs ConfigObservation) error
 }
 
-// ConfigWatcher polls <agentDir>/typeclaw.json and turns content changes
-// into ConfigObservations (ADR 0005). It never reads secrets files and never
-// writes the filesystem. The first sighting seeds the baseline: an
-// observation with revision 0 and no changed paths, so operators can always
-// see what is live right now and the first observation never trips policy.
+// ConfigWatcher polls a sanitized runtime-to-relay observation file and turns
+// content changes into ConfigObservations (ADR 0005). It never mounts or
+// reads the Agent Folder, never reads secrets, and never writes the filesystem.
+// The first sighting seeds the baseline: an observation with revision 0 and no
+// changed paths, so operators can always see what is live right now and the
+// first observation never trips policy.
 type ConfigWatcher struct {
-	Instance *typeclawv1alpha1.TypeClawInstance
-	AgentDir string
-	Interval time.Duration
-	Observer ConfigObserver
-	Log      *slog.Logger
+	Instance        *typeclawv1alpha1.TypeClawInstance
+	ObservationFile string
+	Interval        time.Duration
+	Observer        ConfigObserver
+	Log             *slog.Logger
 
 	now        func() time.Time
 	lastDigest string
@@ -85,23 +100,23 @@ func (w *ConfigWatcher) Run(ctx context.Context) error {
 }
 
 func (w *ConfigWatcher) pollOnce(ctx context.Context) error {
-	raw, err := os.ReadFile(w.AgentDir + "/typeclaw.json")
+	raw, err := readObservation(w.ObservationFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // Agent Folder not initialized yet.
+			return nil // Managed Runtime has not emitted an observation yet.
 		}
 		return err
 	}
-	sum := sha256.Sum256(raw)
-	digest := hex.EncodeToString(sum[:])
-	if digest == w.lastDigest {
+	document, err := decodeObservationDocument(raw)
+	if err != nil {
+		return err
+	}
+	if document.Digest == w.lastDigest {
 		return nil
 	}
 
-	values := topLevelValueDigests(raw)
-
 	obs := ConfigObservation{
-		Digest: digest,
+		Digest: document.Digest,
 		At:     w.nowFunc().UTC(),
 	}
 	if w.lastDigest == "" {
@@ -109,16 +124,67 @@ func (w *ConfigWatcher) pollOnce(ctx context.Context) error {
 		obs.Revision = 0
 	} else {
 		obs.Revision = w.currentRevision() + 1
-		obs.ChangedPaths = changedKeys(w.lastValues, values)
+		obs.ChangedPaths = changedKeys(w.lastValues, document.Values)
 		obs.ProtectedViolation = intersects(w.protectedPaths(), obs.ChangedPaths)
 	}
 
 	if err := w.Observer.Observe(ctx, w.Instance, obs); err != nil {
 		return err // Digest stays uncommitted; the next tick retries.
 	}
-	w.lastDigest = digest
-	w.lastValues = values
+	w.lastDigest = document.Digest
+	w.lastValues = document.Values
 	return nil
+}
+
+const maxObservationBytes = 1 << 20
+
+func readObservation(path string) ([]byte, error) {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, maxObservationBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxObservationBytes {
+		return nil, errors.New("observation document exceeds size limit")
+	}
+	return raw, nil
+}
+
+func decodeObservationDocument(raw []byte) (ConfigObservationDocument, error) {
+	var document ConfigObservationDocument
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&document); err != nil {
+		return ConfigObservationDocument{}, fmt.Errorf("decode observation: %w", err)
+	}
+	if document.Digest == "" {
+		return ConfigObservationDocument{}, errors.New("observation digest is required")
+	}
+	if len(document.Digest) != sha256.Size*2 {
+		return ConfigObservationDocument{}, errors.New("observation digest must be sha256 hex")
+	}
+	if _, err := hex.DecodeString(document.Digest); err != nil {
+		return ConfigObservationDocument{}, errors.New("observation digest must be sha256 hex")
+	}
+	if document.Values == nil {
+		document.Values = map[string]string{}
+	}
+	for key, digest := range document.Values {
+		if key == "" {
+			return ConfigObservationDocument{}, errors.New("observation key must not be empty")
+		}
+		if len(digest) != 16 {
+			return ConfigObservationDocument{}, errors.New("observation key digest must be short sha256 hex")
+		}
+		if _, err := hex.DecodeString(digest); err != nil {
+			return ConfigObservationDocument{}, errors.New("observation key digest must be short sha256 hex")
+		}
+	}
+	return document, nil
 }
 
 // currentRevision reads the persisted revision the Observer wrote back into

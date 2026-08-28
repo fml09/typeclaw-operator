@@ -26,6 +26,18 @@ metricsService:
   port: 8080
   type: ClusterIP
 
+credentialBroker:
+  # The broker is disabled unless an administrator provisions the TLS Secret.
+  enabled: false
+  bindAddress: ":8443"
+  port: 8443
+  trustDomain: typeclaw.local
+  tls:
+    secretName: ""
+    certificateKey: tls.crt
+    privateKey: tls.key
+    clientCAKey: ca.crt
+
 resources:
   requests:
     cpu: 50m

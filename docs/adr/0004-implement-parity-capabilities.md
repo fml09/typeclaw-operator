@@ -34,11 +34,12 @@ schemas.
   optional CIDRs on port 8973; egress `PublicWeb` (the CONTEXT.md destination
   universe) rendered with explicit ipBlock exclusions, DNS excepted;
   `Unrestricted` opt-out.
-- **#9 SelfConfig/GitOps**: agent-authored config changes remain **deferred** —
-  no upstream transport exists for agent→operator submissions, and inventing a
-  write path into the single-writer Agent Folder would violate the ownership
-  model. AutoUpdate deliberately never rewrites spec.runtime.version so
-  GitOps stays authoritative about intent.
+- **#9 SelfConfig/GitOps**: mediated config writes remain **deferred** — no
+  upstream operation contract exists and inventing a write path into the
+  single-writer Agent Folder would violate the ownership model. Sanitized
+  SelfConfig observation is shipped separately under ADR 0005.
+  AutoUpdate deliberately never rewrites spec.runtime.version so GitOps stays
+  authoritative about intent.
 - **#10 license**: Apache-2.0, matching the existing source header template.
 - **#11 status**: conditions describe TypeClaw-owned milestones
   (ResourcesReady, RuntimeReady, BackupReady, AutoUpdateReady); bounded
@@ -54,5 +55,5 @@ schemas.
 
 - Implementation now leads the tracker; open tickets must converge onto
   recorded behavior instead of blocking it, and divergences get new ADRs.
-- SelfConfig remains visibly unimplemented rather than stubbed: no field,
-  type, or controller pretends to exist.
+- SelfConfig mediated writes remain deferred; its sanitized observation and
+  policy projection are implemented under ADR 0005.

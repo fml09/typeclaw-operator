@@ -13,11 +13,28 @@ spec:
     metadata:
       labels:
         {{- include "typeclaw-operator.selectorLabels" . | nindent 8 }}
+        {{- if .Values.credentialBroker.enabled }}
+        typeclaw.fml09.io/component: credential-broker
+        {{- end }}
     spec:
       serviceAccountName: {{ include "typeclaw-operator.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.credentialBroker.enabled }}
+      volumes:
+        - name: credential-broker-tls
+          secret:
+            secretName: {{ required "credentialBroker.tls.secretName is required when credentialBroker.enabled" .Values.credentialBroker.tls.secretName }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.credentialBroker.tls.certificateKey }}
+                path: tls.crt
+              - key: {{ .Values.credentialBroker.tls.privateKey }}
+                path: tls.key
+              - key: {{ .Values.credentialBroker.tls.clientCAKey }}
+                path: ca.crt
       {{- end }}
       securityContext:
         runAsNonRoot: true
@@ -32,6 +49,13 @@ spec:
           args:
             - --metrics-bind-address={{ .Values.metricsBindAddress }}
             - --health-probe-bind-address={{ .Values.healthProbeBindAddress }}
+            {{- if .Values.credentialBroker.enabled }}
+            - --credential-broker-bind-address={{ .Values.credentialBroker.bindAddress }}
+            - --credential-broker-certificate=/var/run/typeclaw/credential-broker/tls.crt
+            - --credential-broker-private-key=/var/run/typeclaw/credential-broker/tls.key
+            - --credential-broker-client-ca=/var/run/typeclaw/credential-broker/ca.crt
+            - --credential-broker-trust-domain={{ .Values.credentialBroker.trustDomain }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: 8080
@@ -39,6 +63,11 @@ spec:
             - name: health
               containerPort: 8081
               protocol: TCP
+            {{- if .Values.credentialBroker.enabled }}
+            - name: credential-broker
+              containerPort: {{ .Values.credentialBroker.port }}
+              protocol: TCP
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -49,6 +78,12 @@ spec:
               port: health
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.credentialBroker.enabled }}
+          volumeMounts:
+            - name: credential-broker-tls
+              mountPath: /var/run/typeclaw/credential-broker
+              readOnly: true
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

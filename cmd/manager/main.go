@@ -7,6 +7,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/metadata"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -14,6 +15,7 @@ import (
 
 	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
 	"github.com/fml09/typeclaw-operator/internal/controller"
+	"github.com/fml09/typeclaw-operator/internal/credential"
 	"github.com/fml09/typeclaw-operator/internal/update"
 )
 
@@ -30,15 +32,26 @@ func init() {
 func main() {
 	var metricsAddr string
 	var probeAddr string
+	var brokerAddr string
+	var brokerCertificate string
+	var brokerPrivateKey string
+	var brokerClientCA string
+	var brokerTrustDomain string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address for the metrics endpoint")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "address for the health probes")
+	flag.StringVar(&brokerAddr, "credential-broker-bind-address", "", "mTLS address for the typed credential broker; empty disables it")
+	flag.StringVar(&brokerCertificate, "credential-broker-certificate", "", "server certificate for the typed credential broker")
+	flag.StringVar(&brokerPrivateKey, "credential-broker-private-key", "", "server private key for the typed credential broker")
+	flag.StringVar(&brokerClientCA, "credential-broker-client-ca", "", "client CA for SPIFFE mTLS authentication")
+	flag.StringVar(&brokerTrustDomain, "credential-broker-trust-domain", credential.RunnerSPIFFETrustDomain, "SPIFFE trust domain accepted by the broker")
 	opts := zap.Options{Development: false}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	cfg := ctrl.GetConfigOrDie()
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
@@ -47,6 +60,11 @@ func main() {
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
+		os.Exit(1)
+	}
+	metadataClient, err := metadata.NewForConfig(cfg)
+	if err != nil {
+		setupLog.Error(err, "unable to create metadata client")
 		os.Exit(1)
 	}
 
@@ -58,6 +76,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&controller.CredentialRequestReconciler{
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		SecretMetadata: controller.KubernetesSecretMetadataReader{Client: metadataClient},
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "CredentialRequest")
+		os.Exit(1)
+	}
 	if err := (&controller.NetworkPolicyReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -73,6 +99,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	if brokerAddr != "" {
+		broker := &credential.Broker{
+			Reader:      mgr.GetClient(),
+			Writer:      mgr.GetClient(),
+			TrustDomain: brokerTrustDomain,
+		}
+		server := controller.NewCredentialBrokerServer(
+			broker,
+			brokerAddr,
+			brokerCertificate,
+			brokerPrivateKey,
+			brokerClientCA,
+		)
+		if err := mgr.Add(server); err != nil {
+			setupLog.Error(err, "unable to add credential broker")
+			os.Exit(1)
+		}
+	}
 	if err := (&controller.AutoUpdateReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
