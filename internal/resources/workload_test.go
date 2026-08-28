@@ -104,12 +104,40 @@ func TestStatefulSetEncodesManagedRuntimeContract(t *testing.T) {
 	if env["TYPECLAW_MANAGED_CONTROL_DIR"] != ManagedControlDir {
 		t.Errorf("control dir env wrong, got %q", env["TYPECLAW_MANAGED_CONTROL_DIR"])
 	}
+	if _, ok := env["TZ"]; ok {
+		t.Errorf("unset runtime timezone must not add TZ, got %q", env["TZ"])
+	}
 
 	if p := runtime.LivenessProbe.HTTPGet; p.Path != "/health/live" || p.Port.IntValue() != ContainerPort {
 		t.Errorf("liveness probe must target /health/live on %d, got %+v", ContainerPort, p)
 	}
 	if p := runtime.ReadinessProbe.HTTPGet; p.Path != "/health/ready" || p.Port.IntValue() != ContainerPort {
 		t.Errorf("readiness probe must target /health/ready on %d, got %+v", ContainerPort, p)
+	}
+}
+
+func TestStatefulSetInjectsRuntimeTimezone(t *testing.T) {
+	in := instance("kakao-agent", func(in *typeclawv1alpha1.TypeClawInstance) {
+		in.Spec.Runtime.Timezone = "Asia/Seoul"
+	})
+	sts, err := StatefulSet(in)
+	if err != nil {
+		t.Fatalf("StatefulSet() error: %v", err)
+	}
+
+	var found *corev1.EnvVar
+	for i := range sts.Spec.Template.Spec.Containers[0].Env {
+		env := &sts.Spec.Template.Spec.Containers[0].Env[i]
+		if env.Name == "TZ" {
+			found = env
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("runtime timezone must render TZ")
+	}
+	if found.Value != "Asia/Seoul" || found.ValueFrom != nil {
+		t.Fatalf("runtime timezone env = %+v, want literal Asia/Seoul", *found)
 	}
 }
 

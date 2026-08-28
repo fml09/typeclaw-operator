@@ -122,6 +122,13 @@ type RuntimeSpec struct {
 	// version-pinned; floating tags are rejected by the workload contract.
 	// +optional
 	Image string `json:"image,omitempty"`
+
+	// Timezone is an optional IANA timezone name injected into the Managed
+	// Runtime as TZ. Empty preserves the image's default timezone (UTC in the
+	// standard managed runtime image).
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*$`
+	// +optional
+	Timezone string `json:"timezone,omitempty"`
 }
 
 // TypeClawInstanceSpec declares the operational policy the operator enforces

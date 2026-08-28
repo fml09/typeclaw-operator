@@ -157,6 +157,15 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 		replicas = 0
 	}
 
+	runtimeEnv := []corev1.EnvVar{
+		{Name: "TYPECLAW_DEPLOYMENT_PROFILE", Value: "managed"},
+		{Name: "TYPECLAW_RUNTIME_ID", Value: fmt.Sprintf("%s/%s", instance.Namespace, instance.Name)},
+		{Name: "TYPECLAW_MANAGED_CONTROL_DIR", Value: ManagedControlDir},
+	}
+	if timezone := instance.Spec.Runtime.Timezone; timezone != "" {
+		runtimeEnv = append(runtimeEnv, corev1.EnvVar{Name: "TZ", Value: timezone})
+	}
+
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
@@ -202,11 +211,7 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 						Name:            "runtime",
 						Image:           EffectiveRuntimeImage(instance),
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						Env: []corev1.EnvVar{
-							{Name: "TYPECLAW_DEPLOYMENT_PROFILE", Value: "managed"},
-							{Name: "TYPECLAW_RUNTIME_ID", Value: fmt.Sprintf("%s/%s", instance.Namespace, instance.Name)},
-							{Name: "TYPECLAW_MANAGED_CONTROL_DIR", Value: ManagedControlDir},
-						},
+						Env:             runtimeEnv,
 						Ports: []corev1.ContainerPort{{
 							Name:          "server",
 							ContainerPort: ContainerPort,
