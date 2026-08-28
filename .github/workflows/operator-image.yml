@@ -31,19 +31,19 @@ jobs:
       - name: Build linux/${{ matrix.arch }} image
         run: docker build --platform linux/${{ matrix.arch }} -t typeclaw-operator:${{ matrix.arch }} .
 
-      - name: Smoke — /manager and /relay present, nonroot user
+      - name: Smoke — manager, relay, credential-runner, nonroot user
         run: |
           cid="$(docker create typeclaw-operator:${{ matrix.arch }})"
           trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
           entries="$(docker export "$cid" | tar -t)"
-          for bin in manager relay; do
+          for bin in manager relay credential-runner; do
             printf '%s\n' "$entries" | grep -qx -e "$bin" -e "./$bin" \
               || { echo "::error::/$bin missing from image"; exit 1; }
           done
           user="$(docker inspect --format '{{.Config.User}}' "$cid")"
           [ "$user" = "65532:65532" ] \
             || { echo "::error::unexpected Config.User '$user'"; exit 1; }
-          echo "smoke ok: /manager + /relay present, Config.User=$user"
+          echo "smoke ok: /manager + /relay + /credential-runner, Config.User=$user"
 
       - name: Export image tarball
         run: docker save typeclaw-operator:${{ matrix.arch }} -o "/tmp/image-${{ matrix.arch }}.tar"
@@ -85,7 +85,7 @@ jobs:
       - name: Create and push multi-arch manifests
         run: |
           sha7="${GITHUB_SHA::7}"
-          for tag in "$sha7" 0.1.0 latest; do
+          for tag in "$sha7" 0.1.1 latest; do
             docker manifest create "${IMAGE}:${tag}" \
               --amend "${IMAGE}:${sha7}-amd64" \
               --amend "${IMAGE}:${sha7}-arm64"

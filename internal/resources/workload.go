@@ -63,7 +63,7 @@ const (
 
 	// DefaultOperatorImage carries the restart-relay binary. Version-coupled
 	// to the chart appVersion so sidecar and manager upgrade together.
-	DefaultOperatorImage = "ghcr.io/fml09/typeclaw-operator:0.1.0"
+	DefaultOperatorImage = "ghcr.io/fml09/typeclaw-operator:0.1.1"
 
 	gracePeriodSeconds = 120
 	tmpMemorySize      = "256Mi"
