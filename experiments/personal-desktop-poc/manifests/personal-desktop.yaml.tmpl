@@ -1,0 +1,131 @@
+# The DataVolume deliberately lives outside spec.dataVolumeTemplates. It is not
+# owned by the VirtualMachine, so stopping or deleting the VM cannot silently
+# delete the user's whole-root disk.
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: "${DESKTOP_NAME}-root"
+  namespace: "${DESKTOP_NAMESPACE}"
+  labels: &desktopLabels
+    app.kubernetes.io/name: personal-desktop
+    app.kubernetes.io/part-of: typeclaw-personal-desktop-poc
+    typeclaw.io/desktop-owner-key: "${OWNER_KEY}"
+    typeclaw.io/experimental: "true"
+spec:
+  source:
+    pvc:
+      name: "${GOLDEN_IMAGE_NAME}"
+      namespace: "${DESKTOP_NAMESPACE}"
+  storage:
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: "${DESKTOP_DISK_SIZE}"
+    storageClassName: "${STORAGE_CLASS}"
+    volumeMode: Filesystem
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: "${DESKTOP_NAME}"
+  namespace: "${DESKTOP_NAMESPACE}"
+  labels:
+    app.kubernetes.io/name: personal-desktop
+    app.kubernetes.io/part-of: typeclaw-personal-desktop-poc
+    typeclaw.io/desktop-owner-key: "${OWNER_KEY}"
+    typeclaw.io/experimental: "true"
+spec:
+  runStrategy: Manual
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: personal-desktop
+        app.kubernetes.io/part-of: typeclaw-personal-desktop-poc
+        kubevirt.io/domain: "${DESKTOP_NAME}"
+        typeclaw.io/desktop-owner-key: "${OWNER_KEY}"
+        typeclaw.io/experimental: "true"
+    spec:
+      architecture: amd64
+      nodeSelector:
+        kubernetes.io/hostname: "${DESKTOP_NODE_NAME}"
+      domain:
+        cpu:
+          cores: ${DESKTOP_CPU_CORES}
+        devices:
+          autoattachGraphicsDevice: true
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinit
+              disk:
+                bus: virtio
+          inputs:
+            - name: tablet
+              type: tablet
+              bus: usb
+          interfaces:
+            - name: default
+              masquerade: {}
+        features:
+          acpi: {}
+        machine:
+          type: q35
+        resources:
+          requests:
+            memory: "${DESKTOP_MEMORY}"
+      networks:
+        - name: default
+          pod: {}
+      terminationGracePeriodSeconds: 90
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: "${DESKTOP_NAME}-root"
+        - name: cloudinit
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              hostname: "${DESKTOP_NAME}"
+              manage_etc_hosts: true
+              users:
+                - default
+                - name: desktop
+                  gecos: Personal Desktop
+                  groups: [adm, audio, cdrom, dialout, dip, floppy, plugdev, sudo, video]
+                  lock_passwd: true
+                  ssh_authorized_keys:
+                    - "${DESKTOP_SSH_AUTHORIZED_KEY}"
+                  shell: /bin/bash
+                  sudo: ALL=(ALL) NOPASSWD:ALL
+              package_update: true
+              package_upgrade: false
+              packages:
+                - dbus-x11
+                - firefox
+                - lightdm
+                - qemu-guest-agent
+                - xfce4
+                - xfce4-goodies
+              write_files:
+                - path: /etc/lightdm/lightdm.conf.d/50-personal-desktop.conf
+                  permissions: "0644"
+                  content: |
+                    [Seat:*]
+                    autologin-user=desktop
+                    autologin-user-timeout=0
+                    user-session=xfce
+                    xserver-command=X -s 0 -dpms
+              bootcmd:
+                - [sh, -c, "echo 'lightdm shared/default-x-display-manager select lightdm' | debconf-set-selections"]
+              runcmd:
+                - [systemctl, enable, qemu-guest-agent.service]
+                - [systemctl, start, qemu-guest-agent.service]
+                - [systemctl, set-default, graphical.target]
+                - [systemctl, enable, lightdm.service]
+              power_state:
+                delay: now
+                mode: reboot
+                message: Reboot after first-boot XFCE installation
+                condition: true

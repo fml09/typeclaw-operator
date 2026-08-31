@@ -1,0 +1,21 @@
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: "${GOLDEN_IMAGE_NAME}"
+  namespace: "${DESKTOP_NAMESPACE}"
+  labels:
+    app.kubernetes.io/name: personal-desktop-golden-image
+    app.kubernetes.io/part-of: typeclaw-personal-desktop-poc
+    typeclaw.io/experimental: "true"
+spec:
+  source:
+    http:
+      url: "${GOLDEN_IMAGE_URL}"
+  storage:
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: "${GOLDEN_DISK_SIZE}"
+    storageClassName: "${STORAGE_CLASS}"
+    volumeMode: Filesystem

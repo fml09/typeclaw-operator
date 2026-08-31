@@ -1,0 +1,23 @@
+{
+  "name": "typeclaw-plugin-personal-desktop-computer-use",
+  "version": "0.0.0-experimental",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "typeclaw": "0.48.7",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/jsdom": "^28.0.1",
+    "@types/proper-lockfile": "^4.1.4",
+    "@types/turndown": "^5.0.6",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "scripts": {
+    "test": "bun test"
+  }
+}

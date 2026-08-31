@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Personal Desktop · Experimental</title>
+  <style>
+    :root { color-scheme: dark; font: 15px/1.5 system-ui, sans-serif; background: #101214; color: #edf0f2; }
+    body { margin: 0; }
+    header, main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 18px 0; }
+    h1 { margin: 0; font-size: 18px; }
+    .tag { padding: 4px 8px; border: 1px solid #8a6720; border-radius: 6px; color: #ffd37a; font-size: 12px; }
+    .notice { margin: 0 0 16px; padding: 12px; border: 1px solid #5f4820; background: #241d11; border-radius: 8px; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; }
+    .screen { min-height: 560px; display: grid; place-items: center; overflow: hidden; background: #050606; border: 1px solid #30363b; border-radius: 10px; }
+    #fallback { max-width: 100%; max-height: 75vh; }
+    #screen canvas { max-width: 100%; }
+    aside { padding: 16px; border: 1px solid #30363b; border-radius: 10px; background: #171a1d; }
+    button { min-height: 40px; margin: 0 6px 8px 0; padding: 0 12px; border: 1px solid #46515a; border-radius: 7px; background: #242a2f; color: inherit; cursor: pointer; }
+    button.primary { background: #176b50; border-color: #258b6b; }
+    button.danger { color: #ffb2aa; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    pre { min-height: 170px; padding: 10px; overflow: auto; background: #0b0d0f; border-radius: 7px; white-space: pre-wrap; word-break: break-word; }
+    small { color: #aeb8c0; }
+    @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } .screen { min-height: 360px; } }
+  </style>
+</head>
+<body>
+  <header><h1>Personal Desktop</h1><span class="tag">EXPERIMENTAL · PoC</span></header>
+  <main>
+    <p id="dev-warning" class="notice" hidden><strong>주의:</strong> query-string 개발 인증을 사용 중입니다. 외부에 노출하지 마세요.</p>
+    <div class="layout">
+      <section id="screen" class="screen"><img id="fallback" alt="개인 데스크톱의 view-only 화면"></section>
+      <aside>
+        <h2>내 PC</h2>
+        <button id="refresh">상태 새로고침</button>
+        <button id="start">PC 켜기</button>
+        <button id="stop">PC 끄기</button>
+        <h3>화면과 제어</h3>
+        <button id="view">View-only 시작</button>
+        <button id="control" class="primary">제어권 요청</button>
+        <button id="takeover" class="danger">Agent에서 제어권 가져오기</button>
+        <button id="release">제어권 놓기</button>
+        <p><small>View-only는 screenshot polling입니다. noVNC 연결은 입력 가능한 exclusive controller 하나만 허용합니다.</small></p>
+        <pre id="status">불러오는 중…</pre>
+      </aside>
+    </div>
+  </main>
+  <script type="module">
+    const query = new URLSearchParams(location.search);
+    const identityQuery = new URLSearchParams();
+    for (const key of ['issuer', 'subject', 'devToken']) if (query.has(key)) identityQuery.set(key, query.get(key));
+    const suffix = identityQuery.size ? `?${identityQuery}` : '';
+    const status = document.querySelector('#status');
+    const image = document.querySelector('#fallback');
+    const screen = document.querySelector('#screen');
+    const startButton = document.querySelector('#start');
+    const stopButton = document.querySelector('#stop');
+    const controlButton = document.querySelector('#control');
+    const takeoverButton = document.querySelector('#takeover');
+    let pollTimer;
+    let snapshotController;
+    let viewEpoch = 0;
+    let viewFailures = 0;
+    let rfb;
+    let controlEpoch = 0;
+    let powerUncertain;
+    let gatewayControlBlocked = false;
+    screen.dataset.controlConnected = 'false';
+
+    if (identityQuery.size) document.querySelector('#dev-warning').hidden = false;
+
+    class GatewayAPIError extends Error {
+      constructor(statusCode, details) {
+        super(String(details.detail || details.error || `Gateway HTTP ${statusCode}`));
+        this.name = 'GatewayAPIError';
+        this.statusCode = statusCode;
+        this.details = details;
+      }
+    }
+
+    async function api(path, options) {
+      const join = path.includes('?') ? '&' : '?';
+      const url = identityQuery.size ? `${path}${join}${identityQuery}` : path;
+      const response = await fetch(url, options);
+      const type = response.headers.get('content-type') || '';
+      const body = type.includes('json') ? await response.json() : await response.text();
+      if (!response.ok) {
+        const details = body && typeof body === 'object'
+          ? body
+          : { detail: String(body || response.statusText) };
+        throw new GatewayAPIError(response.status, details);
+      }
+      return body;
+    }
+
+    function applyPowerPolicy() {
+      const blocked = Boolean(powerUncertain) || gatewayControlBlocked;
+      stopButton.disabled = blocked;
+      controlButton.disabled = blocked;
+      takeoverButton.disabled = blocked;
+      startButton.textContent = powerUncertain
+        ? 'PC 켜기 / 불확실 상태 복구'
+        : gatewayControlBlocked
+          ? 'PC 켜기 / 제어 복구'
+          : 'PC 켜기';
+    }
+
+    function statusDocument(gatewayStatus) {
+      return powerUncertain
+        ? { powerRecoveryRequired: powerUncertain, gateway: gatewayStatus }
+        : gatewayStatus;
+    }
+
+    async function refresh() {
+      try {
+        const gatewayStatus = await api('/api/me');
+        gatewayControlBlocked = gatewayStatus.controlBlocked === true;
+        applyPowerPolicy();
+        status.textContent = JSON.stringify(statusDocument(gatewayStatus), null, 2);
+      } catch (error) {
+        status.textContent = `오류: ${error.message}`;
+      }
+    }
+
+    function powerFailure(action, error) {
+      const details = error instanceof GatewayAPIError ? error.details : {};
+      const ambiguous = !(error instanceof GatewayAPIError)
+        || error.statusCode >= 500
+        || [408, 425, 429].includes(error.statusCode)
+        || details.outcome === 'UnknownOutcome';
+      if (details.controlBlocked === true) {
+        gatewayControlBlocked = true;
+        applyPowerPolicy();
+      }
+      if (!ambiguous) {
+        status.textContent = JSON.stringify(statusDocument({
+          action,
+          ...details,
+          message: error.message,
+        }), null, 2);
+        return;
+      }
+      powerUncertain = {
+        ...details,
+        action,
+        outcome: 'UnknownOutcome',
+        retrySafe: false,
+        controlBlocked: details.controlBlocked ?? 'unknown',
+        message: error.message,
+      };
+      applyPowerPolicy();
+      status.textContent = JSON.stringify(statusDocument(null), null, 2);
+    }
+
+    async function power(action) {
+      if ((powerUncertain || gatewayControlBlocked) && action !== 'start') return;
+      try {
+        const result = await api(`/api/power/${action}`, { method: 'POST' });
+        if (action === 'start') {
+          powerUncertain = undefined;
+          gatewayControlBlocked = false;
+        }
+        applyPowerPolicy();
+        await refresh();
+        return result;
+      } catch (error) {
+        powerFailure(action, error);
+      }
+    }
+
+    function stopViewing() {
+      viewEpoch += 1;
+      clearTimeout(pollTimer);
+      pollTimer = undefined;
+      snapshotController?.abort();
+      snapshotController = undefined;
+      if (image.src.startsWith('blob:')) URL.revokeObjectURL(image.src);
+    }
+
+    async function snapshot(epoch, signal) {
+      const response = await fetch(`/api/screenshot${suffix}`, { cache: 'no-store', signal });
+      if (!response.ok) throw new Error((await response.json()).detail || response.statusText);
+      const blob = await response.blob();
+      if (epoch !== viewEpoch || signal.aborted || rfb) return;
+      const next = URL.createObjectURL(blob);
+      const previous = image.src;
+      image.src = next;
+      if (previous.startsWith('blob:')) URL.revokeObjectURL(previous);
+    }
+
+    async function pollView(epoch) {
+      if (document.hidden === true) {
+        pollTimer = setTimeout(() => pollView(epoch), 5000);
+        return;
+      }
+      const controller = new AbortController();
+      snapshotController = controller;
+      try {
+        await snapshot(epoch, controller.signal);
+        viewFailures = 0;
+      } catch (error) {
+        if (error.name !== 'AbortError' && epoch === viewEpoch) {
+          viewFailures = Math.min(viewFailures + 1, 5);
+          status.textContent = `화면 오류: ${error.message}`;
+        }
+      } finally {
+        if (snapshotController === controller) snapshotController = undefined;
+      }
+      if (epoch !== viewEpoch || controller.signal.aborted || rfb) return;
+      const baseDelay = viewFailures ? Math.min(15000, 1500 * (2 ** viewFailures)) : 1500;
+      const jitteredDelay = Math.round(baseDelay * (0.85 + Math.random() * 0.3));
+      pollTimer = setTimeout(() => pollView(epoch), jitteredDelay);
+    }
+
+    async function startViewing() {
+      stopControl();
+      stopViewing();
+      viewFailures = 0;
+      screen.replaceChildren(image);
+      const epoch = viewEpoch;
+      await pollView(epoch);
+    }
+
+    async function startControl(takeover = false) {
+      stopViewing();
+      stopControl();
+      const epoch = controlEpoch;
+      screen.replaceChildren();
+      const module = await import('/novnc/core/rfb.js');
+      if (epoch !== controlEpoch) return;
+      const RFB = module.default;
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const params = new URLSearchParams(identityQuery);
+      if (takeover) params.set('takeover', '1');
+      const target = `${protocol}//${location.host}/api/vnc?${params}`;
+      const connection = new RFB(screen, target, { wsProtocols: ['binary'] });
+      rfb = connection;
+      connection.scaleViewport = true;
+      connection.resizeSession = false;
+      connection.addEventListener('connect', () => {
+        if (rfb !== connection) {
+          connection.disconnect();
+          return;
+        }
+        screen.dataset.controlConnected = 'true';
+        status.textContent = `제어 연결됨${takeover ? ' (human takeover)' : ''}`;
+        refresh();
+      });
+      connection.addEventListener('disconnect', event => {
+        if (rfb !== connection) return;
+        status.textContent = `제어 종료: ${event.detail.clean ? 'clean' : 'connection lost / outcome unknown'}`;
+        rfb = undefined;
+        screen.dataset.controlConnected = 'false';
+        screen.replaceChildren(image);
+        refresh();
+      });
+      connection.addEventListener('securityfailure', event => {
+        if (rfb !== connection) return;
+        status.textContent = `VNC 보안 오류: ${event.detail.reason}`;
+      });
+    }
+
+    function stopControl() {
+      controlEpoch += 1;
+      const connection = rfb;
+      rfb = undefined;
+      screen.dataset.controlConnected = 'false';
+      if (connection) connection.disconnect();
+      screen.replaceChildren(image);
+    }
+
+    document.querySelector('#refresh').onclick = refresh;
+    document.querySelector('#view').onclick = startViewing;
+    controlButton.onclick = () => startControl(false).catch(error => status.textContent = `제어 오류: ${error.message}`);
+    takeoverButton.onclick = () => startControl(true).catch(error => status.textContent = `takeover 오류: ${error.message}`);
+    document.querySelector('#release').onclick = () => { stopControl(); startViewing(); };
+    startButton.onclick = () => power('start');
+    stopButton.onclick = () => power('stop');
+    addEventListener('beforeunload', () => { stopViewing(); stopControl(); });
+    document.addEventListener?.('visibilitychange', () => {
+      if (document.hidden !== false || rfb || !pollTimer) return;
+      clearTimeout(pollTimer);
+      pollTimer = setTimeout(() => pollView(viewEpoch), 0);
+    });
+    applyPowerPolicy();
+    refresh();
+  </script>
+</body>
+</html>
