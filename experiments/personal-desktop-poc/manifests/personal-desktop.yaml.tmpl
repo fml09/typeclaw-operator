@@ -93,7 +93,9 @@ spec:
                 - default
                 - name: desktop
                   gecos: Personal Desktop
-                  groups: [adm, audio, cdrom, dialout, dip, floppy, plugdev, sudo, video]
+                  # LightDM's PAM autologin profile requires this group for a
+                  # password-locked account used by the PoC desktop.
+                  groups: [adm, audio, cdrom, dialout, dip, floppy, nopasswdlogin, plugdev, sudo, video]
                   lock_passwd: true
                   ssh_authorized_keys:
                     - "${DESKTOP_SSH_AUTHORIZED_KEY}"
@@ -120,6 +122,7 @@ spec:
               bootcmd:
                 - [sh, -c, "echo 'lightdm shared/default-x-display-manager select lightdm' | debconf-set-selections"]
               runcmd:
+                - [usermod, -aG, nopasswdlogin, desktop]
                 - [systemctl, enable, qemu-guest-agent.service]
                 - [systemctl, start, qemu-guest-agent.service]
                 - [systemctl, set-default, graphical.target]
