@@ -166,10 +166,10 @@ KubeVirt VNC handler의 기본값은 새 connection이 기존 VNC session을 dro
 
 TypeClaw extension은 lifecycle과 raw VNC address를 model에 노출하지 않고 다음 두 conceptual capability를 제공합니다.
 
-- `computer_observe`: Gateway의 KubeVirt VNC screenshot을 bounded image와 `frameId`, dimensions, ownership state로 반환합니다.
+- `computer_observe`: Gateway의 bounded screenshot을 vision profile이 읽을 수 있는 artifact와 `frameId`, dimensions, ownership state로 반환합니다.
 - `computer_act`: `expectedFrameId`, `epoch`, `actionId`와 click, move, type, key, scroll action을 보냅니다.
 
-구현된 PoC plugin은 모델 사용성을 위해 이 둘을 `desktop_status`, `desktop_acquire`, `desktop_observe`, `desktop_click`, `desktop_type`, `desktop_key`, `desktop_scroll`, `desktop_power`, `desktop_release`로 나눴습니다. `acquire → observe → observationId를 echo한 input`을 서로 다른 model/tool round로 실행해 blind parallel dispatch를 막습니다. 아직 durable `frameId`/`actionId` ledger는 없으며 각 input 결과를 `Unconfirmed` 또는 연결 유실 시 `UnknownOutcome`로 취급합니다.
+구현된 PoC plugin은 모델 사용성을 위해 이 둘을 `desktop_status`, `desktop_acquire`, `desktop_observe`, `desktop_click`, `desktop_type`, `desktop_key`, `desktop_scroll`, `desktop_power`, `desktop_release`로 나눴습니다. Text-only main model을 지원하기 위해 `acquire → observe → first-party look_at(models.vision) → observationId를 echo한 input`을 서로 다른 model/tool round로 실행해 blind parallel dispatch를 막습니다. 아직 durable `frameId`/`actionId` ledger는 없으며 각 input 결과를 `Unconfirmed` 또는 연결 유실 시 `UnknownOutcome`로 취급합니다.
 
 Plugin은 `sessionId`를 ephemeral input lease의 owner와 cancellation correlation에 쓰지만 durable desktop owner identity로 쓰지 않습니다. Controller session이 끝나면 RFB authority만 release하고 VM/PVC는 유지합니다. 현재 PoC의 power transition은 웹 또는 `desktop_power` tool로 명시적으로 요청해야 하며 lazy start와 idle power policy는 구현하지 않았습니다. 두 기능은 controller 단계의 recommendation입니다.
 

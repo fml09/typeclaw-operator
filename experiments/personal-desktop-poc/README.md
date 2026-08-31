@@ -234,10 +234,10 @@ Plugin은 다음 보장을 의도합니다.
 - tool argument에 `userId`, VM name, VNC URL을 받지 않습니다.
 - Gateway credential이 고정 owner tuple에 bind되므로 model이 다른 사용자를 선택할 수 없습니다.
 - 모든 desktop tool은 TypeClaw의 `security.bypass.personalDesktopControl` permission을 확인합니다. 기본 owner에는 wildcard로 grant되고 그 밖의 role은 명시적으로 grant해야 합니다.
-- `desktop_observe`는 Gateway가 adaptive JPEG로 축소합니다. TypeClaw의 `tool-result-cap.imageMaxBytes`는 최소 `4 × ceil(screenshotMaxBytes / 3)`이어야 하며, 최대 plugin 설정 190,000 bytes에서는 253,336 이상이어야 합니다.
-- TypeClaw이 image result를 size cap placeholder로 바꾸면 plugin은 그 관찰을 fresh frame으로 인정하지 않습니다. 다음 input은 `FreshObservationRequired`로 실패하므로 cap을 올리고 다시 observe해야 합니다.
-- `desktop_observe`가 반환한 예측 불가능한 `observationId`를 다음 inference의 input tool이 echo해야 합니다. 새 frame의 ID를 같은 assistant batch에서 blind reference하거나 한 ID로 input을 두 번 보내는 것은 거절합니다. 이전의 유효한 ID와 새 observe를 같은 parallel batch에 섞으면 이전 input이 먼저 실행될 수 있으므로 두 tool을 같은 batch에 넣지 않습니다.
-- 정상 input 순서는 `desktop_acquire` → 별도 tool round의 `desktop_observe` → 다음 inference의 input 하나입니다. Input tool은 암묵적으로 control lease를 만들지 않습니다.
+- `desktop_observe`는 Gateway가 adaptive JPEG로 축소해 runtime의 private temp path에 저장하고 `imagePath`를 반환합니다. Base64 image를 text-only main model에 직접 보내지 않습니다.
+- 모델은 다음 tool round에서 TypeClaw의 first-party `look_at`을 정확히 그 path 하나에 호출해야 합니다. `look_at`은 `models.vision` profile로 화면을 읽고 text만 main model에 반환합니다. 성공한 matching 호출 전에는 input을 `VisionObservationRequired`로 거절합니다.
+- `desktop_observe`가 반환한 예측 불가능한 `observationId`를 vision 결과를 받은 다음 inference의 input tool이 echo해야 합니다. 새 frame의 ID를 같은 assistant batch에서 blind reference하거나 한 ID로 input을 두 번 보내는 것은 거절합니다. 이전의 유효한 ID와 새 observe를 같은 parallel batch에 섞으면 이전 input이 먼저 실행될 수 있으므로 두 tool을 같은 batch에 넣지 않습니다.
+- 정상 input 순서는 `desktop_acquire` → 별도 tool round의 `desktop_observe` → 반환된 `imagePath`에 대한 `look_at` → 다음 inference의 input 하나입니다. Input tool은 암묵적으로 control lease를 만들지 않습니다.
 - click/type/key/scroll은 하나씩 serialize합니다.
 - Agent control lease는 한 TypeClaw `sessionId`에만 귀속됩니다. 다른 session은 status/observe/windows는 할 수 있지만 acquire/input/release/power로 현재 writer를 가로채지 못하며, controller session이 끝나면 in-flight input을 cancel하고 Gateway release를 확인합니다. 이 access lease 종료는 VM이나 PVC를 삭제하지 않습니다.
 - Gateway release를 확인하지 못하면 local lease를 `Orphaned` quarantine으로 유지합니다. 새 session이나 plugin lifecycle은 기존 Agent controller를 암묵적으로 승계하지 않으며, `desktop_release`가 Gateway release를 확인한 뒤에만 새 acquire를 허용합니다.

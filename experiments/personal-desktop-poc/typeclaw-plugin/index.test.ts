@@ -347,8 +347,30 @@ async function acquire(harness: PluginHarness, sessionId = "session-a") {
 
 async function observe(harness: PluginHarness, sessionId = "session-a") {
   const observed = await harness.runtime.tools.desktop_observe.execute({}, toolContext(sessionId));
+  const callId = `vision-${String(observed.details.observationId)}`;
+  await harness.runtime.hooks["tool.before"](
+    {
+      tool: "look_at",
+      toolProvenance: "first-party",
+      sessionId,
+      callId,
+      args: {
+        images: [{ path: observed.details.imagePath }],
+        prompt: "Describe the current desktop and visible controls.",
+      },
+    },
+    {} as never,
+  );
   await harness.runtime.hooks["tool.after"](
-    { tool: "desktop_observe", sessionId, result: observed },
+    {
+      tool: "look_at",
+      sessionId,
+      callId,
+      result: {
+        content: [{ type: "text", text: "The XFCE desktop is visible." }],
+        details: { count: 1, text: "The XFCE desktop is visible." },
+      },
+    },
     {} as never,
   );
   return observed;
@@ -496,6 +518,61 @@ describe("session-bound local control lease", () => {
 });
 
 describe("typed guest agent actions", () => {
+  test("text-only sessions must route observations through look_at before input", async () => {
+    const harness = await createPluginHarness();
+    try {
+      await acquire(harness);
+      const observed = await harness.runtime.tools.desktop_observe.execute(
+        {},
+        toolContext("session-a"),
+      );
+      expect(observed.content.some((part) => part.type === "image")).toBe(false);
+      expect(typeof observed.details.imagePath).toBe("string");
+
+      await expect(
+        harness.runtime.tools.desktop_click.execute(
+          { observationId: observed.details.observationId, x: 10, y: 20 },
+          toolContext("session-a"),
+        ),
+      ).rejects.toThrow("VisionObservationRequired");
+
+      const callId = "vision-call";
+      await harness.runtime.hooks["tool.before"](
+        {
+          tool: "look_at",
+          toolProvenance: "first-party",
+          sessionId: "session-a",
+          callId,
+          args: {
+            images: [{ path: observed.details.imagePath }],
+            prompt: "Describe the current desktop and visible controls.",
+          },
+        },
+        {} as never,
+      );
+      await harness.runtime.hooks["tool.after"](
+        {
+          tool: "look_at",
+          sessionId: "session-a",
+          callId,
+          result: {
+            content: [{ type: "text", text: "The XFCE desktop is visible." }],
+            details: { count: 1, text: "The XFCE desktop is visible." },
+          },
+        },
+        {} as never,
+      );
+
+      const result = await harness.runtime.tools.desktop_click.execute(
+        { observationId: observed.details.observationId, x: 10, y: 20 },
+        toolContext("session-a"),
+      );
+      expect(result.details.outcome).toBe("Applied");
+    } finally {
+      await harness.restore();
+    }
+  });
+
   test("input requires acquire, a fresh observation, and in-bounds coordinates", async () => {
     const harness = await createPluginHarness();
     try {
