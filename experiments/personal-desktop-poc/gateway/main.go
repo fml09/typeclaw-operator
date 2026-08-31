@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -54,6 +55,11 @@ type config struct {
 	devAccessToken       string
 	allowInsecureDevAuth bool
 	noVNCDir             string
+	agentPort            int
+	agentAddressOverride string
+	agentTimeout         time.Duration
+	agentLeaseTTL        time.Duration
+	agentToken           string
 }
 
 type actorKind string
@@ -78,6 +84,11 @@ type controller struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	closeOnce  sync.Once
+	// ttl > 0 marks a lease acquired over HTTP by the Agent plugin. Such a
+	// lease has no socket lifecycle and must expire when the owner stops
+	// refreshing it; RFB controllers never set it.
+	ttl       time.Duration
+	lastTouch atomic.Int64
 }
 
 func (c *controller) closeDone() {
@@ -130,6 +141,9 @@ const (
 	defaultVNCReadinessTimeout    = 5 * time.Second
 	defaultPowerTimeout           = 15 * time.Second
 	defaultScreenshotConcurrency  = 3
+	defaultAgentPort              = 9876
+	defaultAgentTimeout           = 45 * time.Second
+	defaultAgentLeaseTTL          = 120 * time.Second
 	maxScreenshotRawBytes         = 16 << 20
 	maxFramebufferDimension       = 4096
 	maxFramebufferPixels          = 4096 * 2160
@@ -230,6 +244,77 @@ func (r *controlRegistry) grantLocked(ctx context.Context, desktop string, actor
 	}
 	r.active[desktop] = granted
 	return granted
+}
+
+// acquireAgent grants the exclusive control lease to the Agent without an RFB
+// connection. The lease is anchored to context.Background() because the HTTP
+// request that creates it ends immediately; the expire loop below owns its
+// lifetime instead.
+func (r *controlRegistry) acquireAgent(desktop string, ttl time.Duration) (*controller, error) {
+	r.mu.Lock()
+	if r.draining || r.controlBlocked[desktop] {
+		r.mu.Unlock()
+		return nil, errControlBlocked
+	}
+	if r.takeovers[desktop] != nil || r.active[desktop] != nil {
+		r.mu.Unlock()
+		return nil, errControlBusy
+	}
+	granted := r.grantLocked(context.Background(), desktop, actorAgent)
+	granted.ttl = ttl
+	granted.lastTouch.Store(time.Now().UnixNano())
+	r.mu.Unlock()
+	go granted.expireLoop(r, desktop)
+	return granted, nil
+}
+
+func (c *controller) expireLoop(r *controlRegistry, desktop string) {
+	interval := c.ttl / 4
+	if interval > 5*time.Second {
+		interval = 5 * time.Second
+	}
+	if interval <= 0 {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.ctx.Done():
+			r.release(desktop, c)
+			return
+		case <-ticker.C:
+			if time.Since(time.Unix(0, c.lastTouch.Load())) > c.ttl {
+				r.release(desktop, c)
+				return
+			}
+		}
+	}
+}
+
+// touchAgent extends the idle deadline of an HTTP agent lease. View-only agent
+// calls also count: a model observing or listing windows is still driving the
+// session.
+func (r *controlRegistry) touchAgent(desktop string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if current := r.active[desktop]; current != nil && current.actor == actorAgent && current.ttl > 0 {
+		current.lastTouch.Store(time.Now().UnixNano())
+	}
+}
+
+// releaseAgentOwner releases the desktop only when an HTTP agent lease owns
+// it. A human controller cannot be released by the agent.
+func (r *controlRegistry) releaseAgentOwner(desktop string) bool {
+	r.mu.Lock()
+	current := r.active[desktop]
+	if current == nil || current.actor != actorAgent {
+		r.mu.Unlock()
+		return false
+	}
+	r.mu.Unlock()
+	r.release(desktop, current)
+	return true
 }
 
 func (r *controlRegistry) beginPower(desktop, action string) (*powerOperation, error) {
@@ -358,9 +443,13 @@ type gateway struct {
 	screenshotWriteTimeout time.Duration
 	vncReadinessTimeout    time.Duration
 	powerTimeout           time.Duration
+	agentTimeout           time.Duration
+	agentLeaseTTL          time.Duration
 	screenshotConcurrency  int
 	screenshotOnce         sync.Once
 	screenshotSlots        chan struct{}
+	agentClientOnce        sync.Once
+	agentClient            *http.Client
 }
 
 func effectiveTimeout(configured, fallback time.Duration) time.Duration {
@@ -391,6 +480,14 @@ func (g *gateway) effectivePowerTimeout() time.Duration {
 		return g.powerTimeout
 	}
 	return defaultPowerTimeout
+}
+
+func (g *gateway) effectiveAgentTimeout() time.Duration {
+	return effectiveTimeout(g.agentTimeout, defaultAgentTimeout)
+}
+
+func (g *gateway) effectiveAgentLeaseTTL() time.Duration {
+	return effectiveTimeout(g.agentLeaseTTL, defaultAgentLeaseTTL)
 }
 
 func (g *gateway) tryAcquireScreenshotSlot() bool {
@@ -488,6 +585,11 @@ func (g *gateway) handler() http.Handler {
 	})
 	mux.HandleFunc("GET /api/me", g.handleMe)
 	mux.HandleFunc("GET /api/screenshot", g.handleScreenshot)
+	mux.HandleFunc("POST /api/control/acquire", g.handleControlAcquire)
+	mux.HandleFunc("POST /api/control/release", g.handleControlRelease)
+	mux.HandleFunc("POST /api/agent/screenshot", g.handleAgentScreenshot)
+	mux.HandleFunc("POST /api/agent/{action}", g.handleAgentAction)
+	mux.HandleFunc("GET /api/agent/windows", g.handleAgentWindows)
 	mux.HandleFunc("POST /api/power/{action}", g.handlePower)
 	mux.HandleFunc("GET /api/vnc", g.handleVNC)
 	mux.Handle("GET /novnc/", http.StripPrefix("/novnc/", http.FileServer(http.Dir(g.config.noVNCDir))))
@@ -510,6 +612,33 @@ func loadConfig() (config, error) {
 		devAccessToken:       os.Getenv("POC_DEV_ACCESS_TOKEN"),
 		allowInsecureDevAuth: strings.EqualFold(strings.TrimSpace(os.Getenv("ALLOW_INSECURE_DEV_AUTH")), "true"),
 		noVNCDir:             envOr("NOVNC_DIR", "/opt/novnc"),
+		agentPort:            defaultAgentPort,
+		agentAddressOverride: strings.TrimSpace(os.Getenv("DESKTOP_AGENT_ADDRESS")),
+		agentToken:           strings.TrimSpace(os.Getenv("DESKTOP_AGENT_TOKEN")),
+	}
+	if cfg.agentToken != "" && len(cfg.agentToken) < 24 {
+		return config{}, errors.New("DESKTOP_AGENT_TOKEN must contain at least 24 bytes when set")
+	}
+	if value := strings.TrimSpace(os.Getenv("DESKTOP_AGENT_PORT")); value != "" {
+		port, err := strconv.Atoi(value)
+		if err != nil || port < 1 || port > 65535 {
+			return config{}, errors.New("DESKTOP_AGENT_PORT must be an integer between 1 and 65535")
+		}
+		cfg.agentPort = port
+	}
+	if value := strings.TrimSpace(os.Getenv("DESKTOP_AGENT_TIMEOUT")); value != "" {
+		duration, err := time.ParseDuration(value)
+		if err != nil || duration <= 0 {
+			return config{}, errors.New("DESKTOP_AGENT_TIMEOUT must be a positive duration")
+		}
+		cfg.agentTimeout = duration
+	}
+	if value := strings.TrimSpace(os.Getenv("DESKTOP_AGENT_LEASE_TTL")); value != "" {
+		duration, err := time.ParseDuration(value)
+		if err != nil || duration <= 0 {
+			return config{}, errors.New("DESKTOP_AGENT_LEASE_TTL must be a positive duration")
+		}
+		cfg.agentLeaseTTL = duration
 	}
 	if cfg.typeClawInstanceUID == "" {
 		return config{}, errors.New("TYPECLAW_INSTANCE_UID is required")
@@ -598,6 +727,16 @@ func desktopName(key, issuer, subject, instanceUID string) string {
 
 func agentToken(key, issuer, subject, instanceUID string) string {
 	canonical := "agent-v1\n" + issuer + "\n" + subject + "\n" + instanceUID + "\n"
+	digest := hmac.New(sha256.New, []byte(key))
+	_, _ = digest.Write([]byte(canonical))
+	return hex.EncodeToString(digest.Sum(nil))
+}
+
+// desktopAgentToken is the bearer the Gateway presents to the desktop-agent
+// HTTP service inside the guest VM. Both sides derive it from OWNER_HASH_KEY
+// with a distinct canonical prefix, so no additional secret is distributed.
+func desktopAgentToken(key, issuer, subject, instanceUID string) string {
+	canonical := "desktop-agent-v1\n" + issuer + "\n" + subject + "\n" + instanceUID + "\n"
 	digest := hmac.New(sha256.New, []byte(key))
 	_, _ = digest.Write([]byte(canonical))
 	return hex.EncodeToString(digest.Sum(nil))
@@ -709,38 +848,7 @@ func (g *gateway) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, screenshotReadStatus(err), "desktop framebuffer deadline exceeded", err)
 		return
 	}
-	responseController := http.NewResponseController(w)
-	if err := responseController.SetWriteDeadline(time.Now().Add(g.effectiveScreenshotWriteTimeout())); err != nil &&
-		!errors.Is(err, http.ErrNotSupported) {
-		writeError(w, http.StatusServiceUnavailable, "set screenshot response deadline", err)
-		return
-	}
-	defer func() {
-		if err := responseController.SetWriteDeadline(time.Time{}); err != nil &&
-			!errors.Is(err, http.ErrNotSupported) && g.logger != nil {
-			g.logger.Warn("clear screenshot response deadline", "error", err)
-		}
-	}()
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("X-Framebuffer-Width", strconv.Itoa(frameWidth))
-	w.Header().Set("X-Framebuffer-Height", strconv.Itoa(frameHeight))
-	w.Header().Set("X-Encoded-Width", strconv.Itoa(encodedWidth))
-	w.Header().Set("X-Encoded-Height", strconv.Itoa(encodedHeight))
-	w.Header().Set("X-VMI-UID", string(vmiAfter.UID))
-	w.Header().Set("X-Gateway-Boot-ID", g.bootID)
-	_, generation, _ := g.controls.status(id.desktopName)
-	w.Header().Set("X-Control-Generation", strconv.FormatUint(generation, 10))
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write(encoded); err != nil {
-		if g.logger != nil {
-			g.logger.Warn("write screenshot response", "desktop", id.desktopName, "error", err)
-		}
-		return
-	}
-	if err := responseController.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) && g.logger != nil {
-		g.logger.Warn("flush screenshot response", "desktop", id.desktopName, "error", err)
-	}
+	g.writeScreenshotResponse(w, encoded, contentType, frameWidth, frameHeight, encodedWidth, encodedHeight, string(vmiAfter.UID), id.desktopName)
 }
 
 func kubeVirtReadStatus(err error) int {
@@ -775,6 +883,260 @@ func screenshotTransformStatus(err error) int {
 	default:
 		return http.StatusBadGateway
 	}
+}
+
+func (g *gateway) writeScreenshotResponse(
+	w http.ResponseWriter,
+	encoded []byte,
+	contentType string,
+	frameWidth, frameHeight, encodedWidth, encodedHeight int,
+	vmiUID, desktop string,
+) {
+	responseController := http.NewResponseController(w)
+	if err := responseController.SetWriteDeadline(time.Now().Add(g.effectiveScreenshotWriteTimeout())); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		writeError(w, http.StatusServiceUnavailable, "set screenshot response deadline", err)
+		return
+	}
+	defer func() {
+		if err := responseController.SetWriteDeadline(time.Time{}); err != nil &&
+			!errors.Is(err, http.ErrNotSupported) && g.logger != nil {
+			g.logger.Warn("clear screenshot response deadline", "error", err)
+		}
+	}()
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("X-Framebuffer-Width", strconv.Itoa(frameWidth))
+	w.Header().Set("X-Framebuffer-Height", strconv.Itoa(frameHeight))
+	w.Header().Set("X-Encoded-Width", strconv.Itoa(encodedWidth))
+	w.Header().Set("X-Encoded-Height", strconv.Itoa(encodedHeight))
+	w.Header().Set("X-VMI-UID", vmiUID)
+	w.Header().Set("X-Gateway-Boot-ID", g.bootID)
+	_, generation, _ := g.controls.status(desktop)
+	w.Header().Set("X-Control-Generation", strconv.FormatUint(generation, 10))
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(encoded); err != nil {
+		if g.logger != nil {
+			g.logger.Warn("write screenshot response", "desktop", desktop, "error", err)
+		}
+		return
+	}
+	if err := responseController.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) && g.logger != nil {
+		g.logger.Warn("flush screenshot response", "desktop", desktop, "error", err)
+	}
+}
+
+// requireAgentIdentity admits only owner-scoped agent bearers. Human browser
+// identities have their own paths (web UI, RFB takeover) and must never reach
+// the guest agent.
+func (g *gateway) requireAgentIdentity(w http.ResponseWriter, r *http.Request) (identity, bool) {
+	id, ok := g.requireIdentity(w, r)
+	if !ok {
+		return identity{}, false
+	}
+	if id.actor != actorAgent {
+		writeError(w, http.StatusForbidden, "an agent bearer credential is required", nil)
+		return identity{}, false
+	}
+	return id, true
+}
+
+func (g *gateway) handleControlAcquire(w http.ResponseWriter, r *http.Request) {
+	id, ok := g.requireAgentIdentity(w, r)
+	if !ok {
+		return
+	}
+	if !requireMutationOrigin(w, r, id, g.config.allowInsecureDevAuth) {
+		return
+	}
+	granted, err := g.controls.acquireAgent(id.desktopName, g.effectiveAgentLeaseTTL())
+	if err != nil {
+		switch {
+		case errors.Is(err, errControlBlocked):
+			writeError(w, http.StatusConflict, "desktop control is blocked by its power state", err)
+		case errors.Is(err, errControlBusy):
+			writeError(w, http.StatusConflict, "another actor controls this desktop", err)
+		default:
+			writeError(w, http.StatusServiceUnavailable, "input control unavailable", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"desktopName":       id.desktopName,
+		"gatewayBootID":     g.bootID,
+		"controlGeneration": granted.generation,
+		"actor":             string(id.actor),
+		"leaseTtlSeconds":   int(g.effectiveAgentLeaseTTL().Seconds()),
+	})
+}
+
+func (g *gateway) handleControlRelease(w http.ResponseWriter, r *http.Request) {
+	id, ok := g.requireAgentIdentity(w, r)
+	if !ok {
+		return
+	}
+	if !requireMutationOrigin(w, r, id, g.config.allowInsecureDevAuth) {
+		return
+	}
+	_, _, active := g.controls.status(id.desktopName)
+	if active && !g.controls.releaseAgentOwner(id.desktopName) {
+		writeError(w, http.StatusConflict, "a human owns input; the agent cannot release it", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"desktopName": id.desktopName, "released": true})
+}
+
+var agentInputActions = map[string]bool{"click": true, "type": true, "key": true, "scroll": true, "launch": true}
+
+func (g *gateway) handleAgentAction(w http.ResponseWriter, r *http.Request) {
+	action := r.PathValue("action")
+	if !agentInputActions[action] {
+		writeError(w, http.StatusNotFound, "unknown agent action", nil)
+		return
+	}
+	id, ok := g.requireAgentIdentity(w, r)
+	if !ok {
+		return
+	}
+	if !requireMutationOrigin(w, r, id, g.config.allowInsecureDevAuth) {
+		return
+	}
+	owner, _, active := g.controls.status(id.desktopName)
+	if !active || owner != actorAgent {
+		writeError(w, http.StatusConflict, "agent input control is not held; call desktop_acquire first", nil)
+		return
+	}
+	g.controls.touchAgent(id.desktopName)
+	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read agent action body", err)
+		return
+	}
+	status, body := g.proxyAgent(r.Context(), id, http.MethodPost, "/"+action, payload)
+	proxyAgentResponse(w, status, body)
+}
+
+func (g *gateway) handleAgentScreenshot(w http.ResponseWriter, r *http.Request) {
+	id, ok := g.requireAgentIdentity(w, r)
+	if !ok {
+		return
+	}
+	if !g.tryAcquireScreenshotSlot() {
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusTooManyRequests, "too many concurrent screenshot requests", nil)
+		return
+	}
+	defer g.releaseScreenshotSlot()
+	readCtx, cancelRead := context.WithTimeout(r.Context(), g.effectiveScreenshotTimeout())
+	defer cancelRead()
+	vmi, err := g.virt.VirtualMachineInstance(g.config.namespace).Get(readCtx, id.desktopName, metav1.GetOptions{})
+	if err != nil {
+		writeError(w, screenshotReadStatus(err), "desktop framebuffer is not ready", err)
+		return
+	}
+	if vmi.Status.Phase != kubevirtv1.Running || vmi.DeletionTimestamp != nil {
+		writeError(w, http.StatusConflict, "desktop framebuffer is not ready", errors.New("VMI is not stably running"))
+		return
+	}
+	status, payload := g.proxyAgent(readCtx, id, http.MethodPost, "/screenshot", nil)
+	if status != http.StatusOK {
+		proxyAgentResponse(w, status, payload)
+		return
+	}
+	encoded, contentType, frameWidth, frameHeight, encodedWidth, encodedHeight, err := transformScreenshot(readCtx, payload, r.URL.Query())
+	if err != nil {
+		writeError(w, screenshotTransformStatus(err), "transform desktop screenshot", err)
+		return
+	}
+	if err := readCtx.Err(); err != nil {
+		writeError(w, screenshotReadStatus(err), "desktop framebuffer deadline exceeded", err)
+		return
+	}
+	g.writeScreenshotResponse(w, encoded, contentType, frameWidth, frameHeight, encodedWidth, encodedHeight, string(vmi.UID), id.desktopName)
+}
+
+func (g *gateway) handleAgentWindows(w http.ResponseWriter, r *http.Request) {
+	id, ok := g.requireAgentIdentity(w, r)
+	if !ok {
+		return
+	}
+	g.controls.touchAgent(id.desktopName)
+	readCtx, cancelRead := context.WithTimeout(r.Context(), g.effectiveAgentTimeout())
+	defer cancelRead()
+	status, payload := g.proxyAgent(readCtx, id, http.MethodGet, "/windows", nil)
+	proxyAgentResponse(w, status, payload)
+}
+
+func (g *gateway) agentBaseURL(desktop string) string {
+	if g.config.agentAddressOverride != "" {
+		return strings.TrimRight(g.config.agentAddressOverride, "/")
+	}
+	return fmt.Sprintf("http://%s-agent.%s.svc:%d", desktop, g.config.namespace, g.config.agentPort)
+}
+
+func (g *gateway) sharedAgentClient() *http.Client {
+	g.agentClientOnce.Do(func() {
+		g.agentClient = &http.Client{}
+	})
+	return g.agentClient
+}
+
+// proxyAgent forwards one typed action to the desktop-agent service in the
+// guest. Agent HTTP failures keep the agent's status and body so the plugin
+// can tell a deterministic tool failure (agent 4xx/5xx body without an
+// outcome) from an ambiguous dispatch (gateway-authored outcome field).
+func (g *gateway) proxyAgent(ctx context.Context, id identity, method, path string, body []byte) (int, []byte) {
+	requestCtx, cancel := context.WithTimeout(ctx, g.effectiveAgentTimeout())
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, method, g.agentBaseURL(id.desktopName)+path, bytes.NewReader(body))
+	if err != nil {
+		return http.StatusInternalServerError, gatewayUnknownOutcomeBody("build desktop agent request", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	bearer := g.config.agentToken
+	if bearer == "" {
+		bearer = desktopAgentToken(g.config.ownerHashKey, id.issuer, id.subject, g.config.typeClawInstanceUID)
+	}
+	request.Header.Set("Authorization", "Bearer "+bearer)
+	response, err := g.sharedAgentClient().Do(request)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return http.StatusGatewayTimeout, gatewayUnknownOutcomeBody("desktop agent did not respond in time", err)
+		}
+		return http.StatusBadGateway, gatewayUnknownOutcomeBody("desktop agent is unreachable", err)
+	}
+	defer response.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(response.Body, maxScreenshotRawBytes))
+	if err != nil {
+		return http.StatusBadGateway, gatewayUnknownOutcomeBody("read desktop agent response", err)
+	}
+	if len(payload) == 0 {
+		payload = []byte("{}")
+	}
+	return response.StatusCode, payload
+}
+
+func gatewayUnknownOutcomeBody(message string, cause error) []byte {
+	return mustJSONBody(map[string]any{
+		"error":   message,
+		"detail":  cause.Error(),
+		"outcome": "UnknownOutcome",
+	})
+}
+
+func mustJSONBody(value map[string]any) []byte {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return []byte(`{"error":"encode gateway response"}`)
+	}
+	return encoded
+}
+
+func proxyAgentResponse(w http.ResponseWriter, status int, body []byte) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }
 
 func transformScreenshot(ctx context.Context, raw []byte, query url.Values) ([]byte, string, int, int, int, int, error) {
@@ -991,7 +1353,6 @@ func definitivePowerRejection(err error) bool {
 	switch apierrors.ReasonForError(err) {
 	case metav1.StatusReasonNotFound,
 		metav1.StatusReasonUnauthorized,
-		metav1.StatusReasonForbidden,
 		metav1.StatusReasonBadRequest,
 		metav1.StatusReasonInvalid,
 		metav1.StatusReasonMethodNotAllowed,

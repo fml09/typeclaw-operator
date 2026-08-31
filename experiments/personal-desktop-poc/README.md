@@ -33,23 +33,29 @@ v1\n<issuer>\n<subject>\n<TypeClawInstance UID>\n
 ## 구조
 
 ```text
-Human browser ── OIDC reverse proxy ─┐
+Human browser ── OIDC reverse proxy ──┐
                  (+ private proxy key)│
                                     │ HTTPS / WSS
-TypeClaw computer-use plugin ────────┤
-  (owner-scoped HMAC bearer)         ▼
-                           Personal Desktop Gateway
-                           ├─ screenshot → view-only polling
-                           ├─ one exclusive RFB controller
-                           └─ narrow namespace ServiceAccount
-                                      │ KubeVirt subresources
-                                      ▼
-                           KubeVirt VMI native VNC
-                                      │
-                              Ubuntu 24.04 + XFCE
-                                      │
+                                    ▼                TypeClaw computer-use plugin
+                           Personal Desktop Gateway ◀── owner-scoped HMAC bearer,
+                           ├─ human: KubeVirt VNC relay +    HTTPS typed actions
+                           │  view-only screenshot polling        │
+                           ├─ agent: exclusive control lease,     │ in-cluster Service
+                           │  typed action proxy                  ▼
+                           └─ narrow namespace ServiceAccount   pd-<key>-agent
+                                      │ KubeVirt subresources     │ masquerade port
+                                      ▼                           ▼
+                           KubeVirt VMI native VNC      desktop-agent (VM 내부, X11)
+                                      │                 ├─ click/type/key/scroll/launch
+                              Ubuntu 24.04 + XFCE        ├─ screenshot/windows
+                                      │                 └─ X11 실제 화면 기준 응답
                          user-owned whole-root DataVolume/PVC
 ```
+
+Agent의 computer-use 입력은 VM 화면을 browser로 우회하지 않습니다. Plugin은 Gateway로 typed
+action(HTTP)을 보내고, Gateway는 이를 VM 내부 `desktop-agent` Service로 전달합니다. xdotool 기반
+입력은 실행 결과를 반환하므로 noVNC canvas 좌표 변환과 "socket write = 적용 증거"라는 RFB 한계가
+사라집니다. VNC와 KubeVirt screenshot은 사람의 관찰·긴급 제어 전용으로 남습니다.
 
 KubeVirt/QEMU native VNC를 사용하므로 guest에 public VNC server나 reusable VNC password를 넣지 않습니다. Browser와 TypeClaw은 Kubernetes token을 받지 않고 Gateway에만 연결합니다.
 
@@ -58,7 +64,8 @@ KubeVirt/QEMU native VNC를 사용하므로 guest에 public VNC server나 reusab
 - 여러 browser tab은 screenshot polling으로 view-only 관찰을 할 수 있습니다.
 - Screenshot은 Gateway 전체에서 동시 3개까지만 upstream KubeVirt API에 전달하고 초과 요청은 `429 + Retry-After`로 즉시 거절합니다. Web UI는 hidden tab에서 polling을 멈추고 오류에는 jittered exponential backoff를 적용합니다.
 - Gateway status 조회는 5초, screenshot capture는 12초, screenshot response write는 5초, VNC readiness 조회는 5초 안에 끝나야 합니다. VNC stream 자체는 장시간 session이므로 이 짧은 deadline을 적용하지 않습니다.
-- noVNC/RFB connection은 입력 가능한 controller 하나만 엽니다.
+- Agent 입력은 Gateway가 검증한 owner-scoped 요청만 guest desktop-agent typed action으로 전달합니다. RFB/noVNC는 사람의 입력 경로이며 입력 가능한 controller는 하나뿐입니다.
+- desktop-agent HTTP lease는 idle TTL(기본 120초, `DESKTOP_AGENT_LEASE_TTL`)이 있습니다. Plugin의 observe/action 호출이 lease를 갱신하고, TTL이 지나면 grant가 해제되어 다음 입력이 `ControlRequired`로 실패합니다.
 - Human은 `Agent에서 제어권 가져오기`를 명시적으로 눌러 Agent를 revoke할 수 있습니다.
 - Agent는 Human controller를 preempt할 수 없습니다.
 - Gateway restart는 모든 in-memory grant를 잊고 socket을 닫습니다. 복구를 추측하지 않습니다.
@@ -66,12 +73,13 @@ KubeVirt/QEMU native VNC를 사용하므로 guest에 public VNC server나 reusab
 ## 파일
 
 - [`state-model.html`](./state-model.html): Personal Desktop, Access Session, input ownership을 분리해 검증하는 throwaway prototype
-- [`gateway/`](./gateway): KubeVirt screenshot/VNC subresource를 relay하고 Surf-like 웹 화면을 제공하는 Go service
-- [`manifests/`](./manifests): namespace-scoped RBAC, Gateway, golden DataVolume, 사용자별 DataVolume/VM template
+- [`gateway/`](./gateway): 사람용 VNC/screenshot relay와 Agent typed action proxy를 제공하는 Go service
+- [`manifests/`](./manifests): namespace-scoped RBAC, Gateway, golden DataVolume, 사용자별 DataVolume/VM/agent Service template
 - [`scripts/render-platform.sh`](./scripts/render-platform.sh): platform/golden image YAML을 stdout으로 render
 - [`scripts/render-personal-desktop.sh`](./scripts/render-personal-desktop.sh): owner tuple에서 사용자별 YAML을 stdout으로 render
 - [`scripts/derive-agent-token.sh`](./scripts/derive-agent-token.sh): signing key에서 정확한 owner tuple에만 유효한 Agent bearer를 파생
-- [`typeclaw-plugin/`](./typeclaw-plugin): acquire/observe/click/type/key/scroll/power/release tools를 제공하는 TypeClaw plugin
+- [`typeclaw-plugin/`](./typeclaw-plugin): status/acquire/observe/click/type/key/scroll/launch/windows/power/release tools를 제공하는 TypeClaw plugin
+- [`desktop-agent/`](./desktop-agent): VM 내부에서 X11 typed action HTTP endpoint를 제공하는 Python agent
 - [`docs/research/persistent-linux-desktop-poc.md`](../../docs/research/persistent-linux-desktop-poc.md): Surf, KubeVirt, CDI, noVNC 근거와 version-aware 조사
 
 ## 로컬 검증
@@ -86,7 +94,7 @@ sh scripts/render.test.sh
 (cd typeclaw-plugin && bun install --frozen-lockfile && bunx tsc --noEmit && bun test)
 ```
 
-이 검증은 상태 전이, 인증/Origin, exclusive control, power ambiguity, stalled KubeVirt/read/write와 `agent-browser` deadline 이후의 slot/queue 회수, plugin session cleanup, manifest render를 확인합니다. 실제 image clone, XFCE first boot, native VNC, browser/Agent 입력과 stop/start persistence는 아래 cluster prerequisite를 충족한 뒤 별도 E2E로 확인해야 합니다.
+이 검증은 상태 전이, 인증/Origin, exclusive control, power ambiguity, agent lease TTL, typed action dispatch/forwarding, plugin session cleanup, manifest render(포함된 desktop-agent 소스)를 확인합니다. 실제 image clone, XFCE first boot, native VNC, guest 입력과 stop/start persistence는 아래 cluster prerequisite를 충족한 뒤 별도 E2E로 확인해야 합니다.
 
 ## 전제 조건
 
@@ -231,15 +239,15 @@ Plugin은 다음 보장을 의도합니다.
 - `desktop_observe`가 반환한 예측 불가능한 `observationId`를 다음 inference의 input tool이 echo해야 합니다. 새 frame의 ID를 같은 assistant batch에서 blind reference하거나 한 ID로 input을 두 번 보내는 것은 거절합니다. 이전의 유효한 ID와 새 observe를 같은 parallel batch에 섞으면 이전 input이 먼저 실행될 수 있으므로 두 tool을 같은 batch에 넣지 않습니다.
 - 정상 input 순서는 `desktop_acquire` → 별도 tool round의 `desktop_observe` → 다음 inference의 input 하나입니다. Input tool은 암묵적으로 control lease를 만들지 않습니다.
 - click/type/key/scroll은 하나씩 serialize합니다.
-- Agent control lease는 한 TypeClaw `sessionId`에만 귀속됩니다. 다른 session은 status/observe는 할 수 있지만 acquire/input/release/power로 현재 writer를 가로채지 못하며, controller session이 끝나면 in-flight input을 cancel하고 RFB release를 확인합니다. 이 access lease 종료는 VM이나 PVC를 삭제하지 않습니다.
-- Browser/RFB cleanup을 확인하지 못하면 local lease를 `Orphaned` quarantine으로 유지합니다. 새 session이나 plugin lifecycle은 기존 Agent controller를 암묵적으로 승계하지 않으며, `desktop_release`가 browser close와 Gateway release를 확인한 뒤에만 새 acquire를 허용합니다.
-- Agent controller가 free일 때만 연결합니다. Human controller는 preempt하지 않습니다.
+- Agent control lease는 한 TypeClaw `sessionId`에만 귀속됩니다. 다른 session은 status/observe/windows는 할 수 있지만 acquire/input/release/power로 현재 writer를 가로채지 못하며, controller session이 끝나면 in-flight input을 cancel하고 Gateway release를 확인합니다. 이 access lease 종료는 VM이나 PVC를 삭제하지 않습니다.
+- Gateway release를 확인하지 못하면 local lease를 `Orphaned` quarantine으로 유지합니다. 새 session이나 plugin lifecycle은 기존 Agent controller를 암묵적으로 승계하지 않으며, `desktop_release`가 Gateway release를 확인한 뒤에만 새 acquire를 허용합니다.
+- Agent controller가 free일 때만 acquire합니다. Human controller는 preempt하지 않습니다.
 - `observationId`, Gateway boot ID, control generation, VMI가 바뀌거나 input을 보낸 뒤에는 새 `desktop_observe` 없이는 다음 input을 거절합니다. Gateway 재시작 뒤 generation 숫자가 우연히 재사용돼도 이전 frame을 인정하지 않습니다.
-- input dispatch 뒤 결과를 `Unconfirmed`로 반환합니다. 연결/ACK가 사라진 action은 `UnknownOutcome`이고 자동 replay하면 안 됩니다.
+- click/type/key/scroll/launch는 guest desktop-agent에서 실행되고 `applied` 결과를 반환합니다. 단 applied는 "X11 이벤트가 전달됐다"까지만 증명하므로 의도한 효과는 항상 다음 observe로 확인합니다. Transport 손실 같은 응답을 잃은 action은 `UnknownOutcome`이고 자동 replay하면 안 됩니다.
 
 Permission은 caller admission을, owner-scoped Gateway token은 target binding을 담당합니다. 둘을 합쳐도 이 plugin은 한 owner 전용 TypeClaw runtime을 전제로 하므로 서로 다른 end user를 같은 runtime에 admission하는 구성에는 배포하면 안 됩니다.
 
-현재 plugin은 noVNC/RFB 구현을 중복하지 않고 TypeClaw container에 포함된 `agent-browser`로 Gateway canvas를 구동합니다. `agent-browser 0.33.0`에서는 WebSocket에도 인증을 전달하기 위해 Gateway 전용 session에 global extra headers를 설정하므로 이 session을 다른 origin/도구와 공유하면 안 되며 controller session end, release, error, dispose 때 닫습니다. 이것은 feasibility를 빨리 검증하기 위한 adapter입니다. Production plugin은 typed action protocol과 durable action ledger를 가진 별도 Broker client로 바꾸는 편이 맞습니다.
+Plugin은 더 이상 `agent-browser`나 noVNC canvas를 사용하지 않습니다. 입력과 관찰은 Gateway의 typed action proxy(`/api/control/*`, `/api/agent/*`)와 guest desktop-agent로 직접 전달됩니다. Production 경로 역시 typed action protocol과 durable action ledger를 가진 별도 Broker client 방향이며, 이 PoC는 그 첫 구현입니다.
 
 ## 6. 영속성 확인
 
@@ -290,7 +298,8 @@ Production에서는 account disable이 `access revoke + VM stop + disk retain`�
 - **Gateway에 Kubernetes token이 있음:** namespace-scoped Role로 VM/VMI get, start/stop, VNC/screenshot만 허용합니다. 그래도 production의 “data plane에 Kubernetes credential 없음” 경계에는 맞지 않는 명시적 experimental 예외입니다.
 - **Header auth가 완성된 OIDC가 아님:** trusted reverse proxy가 client header를 strip하고 검증된 identity와 private proxy token을 inject한다는 전제가 깨지면 identity spoofing이 가능합니다.
 - **단일 Gateway replica:** control lock은 memory에 있습니다. Deployment는 rollout 중 두 Pod가 겹치지 않도록 `Recreate`를 사용하므로 update 때 잠깐 중단됩니다. replicas를 2개로 늘리면 one-writer 보장이 깨집니다. Production에는 durable/linearizable grant store가 필요합니다.
-- **RFB action acknowledgement 없음:** socket write는 guest application effect의 증거가 아닙니다.
+- **Agent applied는 화면 효과까지 증명하지 않음:** desktop-agent의 `applied`는 xdotool 실행 성공까지만 증명합니다. 의도한 guest application 효과는 여전히 다음 observe로 확인해야 합니다.
+- **cloud-init의 agent token 노출:** desktop-agent bearer는 `OWNER_HASH_KEY`에서 파생되어 VM의 cloud-init userData에 기록됩니다. 해당 namespace에서 VM spec을 읽을 수 있는 주체는 이 token으로 desktop-agent Service에 직접 접근할 수 있습니다. PoC 한계이며 production은 Secret 기반 전달과 agent 쪽 추가 검증이 필요합니다.
 - **Screenshot privacy:** framebuffer에는 cookie, password, personal data가 보일 수 있습니다. PoC는 recording/retention/redaction 정책을 제공하지 않습니다.
 - **Persistent compromise:** 다운로드한 malware, browser cookie, startup entry도 정상 파일처럼 다음 session에 남습니다.
 - **운영 기능 없음:** backup/restore, quota, encryption key lifecycle, patch/reimage/reset, orphan sweeper, idle TTL controller가 없습니다.

@@ -7,6 +7,7 @@
       "@/*": ["./node_modules/typeclaw/src/*"]
     },
     "strict": true,
+    "lib": ["ES2024"],
     "noEmit": true,
     "skipLibCheck": true,
     "types": ["bun"]

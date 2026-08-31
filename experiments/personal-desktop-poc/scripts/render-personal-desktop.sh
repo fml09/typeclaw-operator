@@ -93,6 +93,22 @@ fi
 case "$DESKTOP_CPU_CORES" in ''|*[!0-9]*) echo "DESKTOP_CPU_CORES must be an integer" >&2; exit 2 ;; esac
 case "$DESKTOP_CPU_CORES" in 0|00*) echo "DESKTOP_CPU_CORES must be greater than zero" >&2; exit 2 ;; esac
 
+
+DESKTOP_AGENT_TOKEN=$(printf 'desktop-agent-v1\n%s\n%s\n%s\n' "$OWNER_ISSUER" "$OWNER_SUBJECT" "$TYPECLAW_INSTANCE_UID" \
+  | openssl dgst -sha256 -hmac "$OWNER_HASH_KEY" -binary \
+  | od -An -tx1 \
+  | tr -d ' \n')
+if [ "${#DESKTOP_AGENT_TOKEN}" -ne 64 ]; then
+  echo "failed to derive DESKTOP_AGENT_TOKEN" >&2
+  exit 1
+fi
+
+agent_source="$script_dir/../desktop-agent/desktop-agent.py"
+if [ ! -f "$agent_source" ]; then
+  echo "desktop-agent source not found: $agent_source" >&2
+  exit 1
+fi
+
 owner_key=$(printf 'v1\n%s\n%s\n%s\n' "$OWNER_ISSUER" "$OWNER_SUBJECT" "$TYPECLAW_INSTANCE_UID" \
   | openssl dgst -sha256 -hmac "$OWNER_HASH_KEY" -binary \
   | od -An -tx1 \
@@ -106,6 +122,9 @@ fi
 
 DESKTOP_NAME="pd-$owner_key"
 
+sed_output=$(mktemp)
+trap 'rm -f -- "$sed_output"' EXIT HUP INT TERM
+
 sed \
   -e "s|\${DESKTOP_NAMESPACE}|$DESKTOP_NAMESPACE|g" \
   -e "s|\${DESKTOP_NAME}|$DESKTOP_NAME|g" \
@@ -117,4 +136,21 @@ sed \
   -e "s|\${DESKTOP_MEMORY}|$DESKTOP_MEMORY|g" \
   -e "s|\${DESKTOP_NODE_NAME}|$DESKTOP_NODE_NAME|g" \
   -e "s|\${DESKTOP_SSH_AUTHORIZED_KEY}|$DESKTOP_SSH_AUTHORIZED_KEY|g" \
-  "$template"
+  -e "s|\${DESKTOP_AGENT_TOKEN}|$DESKTOP_AGENT_TOKEN|g" \
+  "$template" >"$sed_output"
+
+# Inline the desktop-agent Python source into the cloud-init write_files
+# entry. The placeholder line is replaced with the file content indented to
+# the block scalar level of `content: |` (20 spaces); blank lines stay empty
+# so the YAML block scalar does not gain trailing-space noise.
+awk -v agent="$agent_source" '
+  $0 == "__DESKTOP_AGENT_PYTHON__" {
+    while ((getline line < agent) > 0) {
+      if (line == "") print ""
+      else print "                    " line
+    }
+    close(agent)
+    next
+  }
+  { print }
+' "$sed_output"

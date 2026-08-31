@@ -1203,3 +1203,303 @@ func TestScreenshotResizeHonorsCancellation(t *testing.T) {
 		t.Fatalf("canceled resize error = %v, want context canceled", err)
 	}
 }
+
+func TestDesktopAgentTokenUsesCanonicalHMAC(t *testing.T) {
+	got := desktopAgentToken("kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk", "https://issuer.example", "subject-123", "instance-uid")
+	const want = "f46e66b9b33be662e4fb529a24d7dcaa49f14d7c55bcbf1ed89c07e7b650a4ae"
+	if got != want {
+		t.Fatalf("desktopAgentToken() = %q, want %q", got, want)
+	}
+}
+
+type agentHarness struct {
+	handler http.Handler
+	issuer  string
+	subject string
+	config  config
+}
+
+func newAgentHarness(t *testing.T, agentServerURL string) *agentHarness {
+	t.Helper()
+	config := config{
+		typeClawInstanceUID:  "instance-uid",
+		ownerHashKey:         "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+		agentTokenKey:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		authProxyToken:       "pppppppppppppppppppppppp",
+		agentAddressOverride: agentServerURL,
+		agentLeaseTTL:        time.Minute,
+	}
+	g := gateway{config: config, controls: newControlRegistry(), bootID: "boot-test"}
+	return &agentHarness{
+		handler: g.handler(),
+		issuer:  "https://issuer.example",
+		subject: "subject-123",
+		config:  config,
+	}
+}
+
+func (h *agentHarness) agentRequest(t *testing.T, method, target string, body io.Reader) *http.Request {
+	t.Helper()
+	request := httptest.NewRequest(method, target, body)
+	request.Header.Set("X-Personal-Desktop-Issuer", h.issuer)
+	request.Header.Set("X-Personal-Desktop-Subject", h.subject)
+	request.Header.Set("Authorization", "Bearer "+agentToken(h.config.agentTokenKey, h.issuer, h.subject, h.config.typeClawInstanceUID))
+	return request
+}
+
+func (h *agentHarness) humanRequest(t *testing.T, method, target string) *http.Request {
+	t.Helper()
+	request := httptest.NewRequest(method, target, nil)
+	request.Header.Set("X-Personal-Desktop-Issuer", h.issuer)
+	request.Header.Set("X-Personal-Desktop-Subject", h.subject)
+	request.Header.Set("X-Personal-Desktop-Proxy-Token", h.config.authProxyToken)
+	return request
+}
+
+func TestAgentControlAcquireReleaseAndOwnership(t *testing.T) {
+	h := newAgentHarness(t, "http://desktop-agent.invalid")
+
+	response := httptest.NewRecorder()
+	h.handler.ServeHTTP(response, h.humanRequest(t, http.MethodPost, "/api/control/acquire"))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("human acquire status = %d, want 403", response.Code)
+	}
+	response = httptest.NewRecorder()
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/control/acquire", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("agent acquire status = %d, body %s", response.Code, response.Body.String())
+	}
+	var granted struct {
+		ControlGeneration uint64 `json:"controlGeneration"`
+		GatewayBootID     string `json:"gatewayBootID"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &granted); err != nil {
+		t.Fatal(err)
+	}
+	if granted.ControlGeneration == 0 || granted.GatewayBootID == "" {
+		t.Fatalf("acquire response = %s", response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/control/acquire", nil))
+	if response.Code != http.StatusConflict {
+		t.Fatalf("double acquire status = %d, want 409", response.Code)
+	}
+
+	response = httptest.NewRecorder()
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/control/release", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("agent release status = %d, body %s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/control/acquire", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("re-acquire after release status = %d", response.Code)
+	}
+}
+
+func TestAgentActionRequiresAcquiredControl(t *testing.T) {
+	h := newAgentHarness(t, "http://desktop-agent.invalid")
+	response := httptest.NewRecorder()
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/click", bytes.NewBufferString(`{"x":1,"y":2}`)))
+	if response.Code != http.StatusConflict {
+		t.Fatalf("click without acquire status = %d, want 409", response.Code)
+	}
+
+	response = httptest.NewRecorder()
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/unknown", bytes.NewBufferString(`{}`)))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unknown action status = %d, want 404", response.Code)
+	}
+}
+
+func TestAgentActionForwardsToGuestAgentWithDerivedBearer(t *testing.T) {
+	var gotAuthorization, gotPath, gotBody string
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthorization = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"applied":true}`))
+	}))
+	defer agentServer.Close()
+	h := newAgentHarness(t, agentServer.URL)
+
+	response := httptest.NewRecorder()
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/control/acquire", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("acquire status = %d", response.Code)
+	}
+	response = httptest.NewRecorder()
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/click", bytes.NewBufferString(`{"x":10,"y":20,"button":"left","clicks":1}`)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("click status = %d, body %s", response.Code, response.Body.String())
+	}
+	if gotPath != "/click" || gotBody != `{"x":10,"y":20,"button":"left","clicks":1}` {
+		t.Fatalf("agent saw path %q body %q", gotPath, gotBody)
+	}
+	wantBearer := "Bearer " + desktopAgentToken(h.config.ownerHashKey, h.issuer, h.subject, h.config.typeClawInstanceUID)
+	if gotAuthorization != wantBearer {
+		t.Fatalf("agent saw Authorization %q, want derived desktop-agent bearer", gotAuthorization)
+	}
+}
+
+func TestAgentActionReportsUnknownOutcomeWhenGuestIsUnreachable(t *testing.T) {
+	h := newAgentHarness(t, "http://127.0.0.1:1")
+	response := httptest.NewRecorder()
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/control/acquire", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("acquire status = %d", response.Code)
+	}
+	response = httptest.NewRecorder()
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/click", bytes.NewBufferString(`{"x":1,"y":2}`)))
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("click status = %d, want 502", response.Code)
+	}
+	var body struct {
+		Outcome string `json:"outcome"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Outcome != "UnknownOutcome" {
+		t.Fatalf("click body outcome = %q, want UnknownOutcome", body.Outcome)
+	}
+}
+
+func TestAgentScreenshotProxiesGuestFrame(t *testing.T) {
+	source := image.NewRGBA(image.Rect(0, 0, 1600, 900))
+	var raw bytes.Buffer
+	if err := png.Encode(&raw, source); err != nil {
+		t.Fatal(err)
+	}
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/screenshot" {
+			t.Errorf("agent saw path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(raw.Bytes())
+	}))
+	defer agentServer.Close()
+
+	const (
+		issuer    = "https://issuer.example"
+		subject   = "subject-123"
+		namespace = "personal-desktop-poc"
+	)
+	desktop := desktopName("kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk", issuer, subject, "instance-uid")
+	ctrl := gomock.NewController(t)
+	virt := kubecli.NewMockKubevirtClient(ctrl)
+	virtualMachineInstances := kubecli.NewMockVirtualMachineInstanceInterface(ctrl)
+	virt.EXPECT().VirtualMachineInstance(namespace).Return(virtualMachineInstances)
+	virtualMachineInstances.EXPECT().Get(gomock.Any(), desktop, gomock.Any()).Return(
+		&kubevirtv1.VirtualMachineInstance{
+			ObjectMeta: metav1.ObjectMeta{UID: "vmi-a"},
+			Status:     kubevirtv1.VirtualMachineInstanceStatus{Phase: kubevirtv1.Running},
+		}, nil)
+
+	config := config{
+		namespace:            namespace,
+		typeClawInstanceUID:  "instance-uid",
+		ownerHashKey:         "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+		agentTokenKey:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		authProxyToken:       "pppppppppppppppppppppppp",
+		agentAddressOverride: agentServer.URL,
+		agentLeaseTTL:        time.Minute,
+	}
+	g := gateway{config: config, virt: virt, controls: newControlRegistry(), bootID: "boot-test"}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/agent/screenshot?format=jpeg&maxWidth=1024&maxBytes=200000&quality=65", nil)
+	request.Header.Set("X-Personal-Desktop-Issuer", issuer)
+	request.Header.Set("X-Personal-Desktop-Subject", subject)
+	request.Header.Set("Authorization", "Bearer "+agentToken(config.agentTokenKey, issuer, subject, config.typeClawInstanceUID))
+	response := httptest.NewRecorder()
+	g.handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("agent screenshot status = %d, body %s", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "image/jpeg" {
+		t.Fatalf("agent screenshot content type = %q", contentType)
+	}
+	if width := response.Header().Get("X-Framebuffer-Width"); width != "1600" {
+		t.Fatalf("agent screenshot framebuffer width = %q, want 1600", width)
+	}
+	if vmiUID := response.Header().Get("X-VMI-UID"); vmiUID != "vmi-a" {
+		t.Fatalf("agent screenshot VMI UID = %q", vmiUID)
+	}
+}
+
+func TestAgentLeaseExpiresWithoutTouchAndSurvivesWithTouch(t *testing.T) {
+	registry := newControlRegistry()
+	if _, err := registry.acquireAgent("pd-expire", 60*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	renewing, err := registry.acquireAgent("pd-renew", 100*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		registry.touchAgent("pd-renew")
+		if _, _, active := registry.status("pd-expire"); !active {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, _, active := registry.status("pd-expire"); active {
+		t.Fatal("unrefreshed agent lease outlived its TTL")
+	}
+	if _, _, active := registry.status("pd-renew"); !active {
+		t.Fatal("touched agent lease expired despite refreshes")
+	}
+	if current, ok := registry.active["pd-renew"]; !ok || current != renewing {
+		t.Fatal("touched agent lease lost its controller identity")
+	}
+	registry.release("pd-renew", renewing)
+	if _, _, active := registry.status("pd-renew"); active {
+		t.Fatal("explicit release did not clear the agent lease")
+	}
+}
+
+func TestAgentReleaseCannotDropHumanController(t *testing.T) {
+	registry := newControlRegistry()
+	human, err := registry.acquire(context.Background(), "pd-a", actorHuman, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registry.releaseAgentOwner("pd-a") {
+		t.Fatal("agent release removed a human controller")
+	}
+	if _, _, active := registry.status("pd-a"); !active {
+		t.Fatal("human controller was not active after refused agent release")
+	}
+	registry.release("pd-a", human)
+}
+
+func TestAgentActionPrefersConfiguredTokenOverDerivedBearer(t *testing.T) {
+	var gotAuthorization string
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthorization = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"applied":true}`))
+	}))
+	defer agentServer.Close()
+
+	h := newAgentHarness(t, agentServer.URL)
+	h.config.agentToken = "configured-desktop-agent-token-0123456789"
+	g := gateway{config: h.config, controls: newControlRegistry(), bootID: "boot-test"}
+
+	response := httptest.NewRecorder()
+	g.handler().ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/control/acquire", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("acquire status = %d", response.Code)
+	}
+	response = httptest.NewRecorder()
+	g.handler().ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/click", bytes.NewBufferString(`{"x":1,"y":2}`)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("click status = %d, body %s", response.Code, response.Body.String())
+	}
+	if gotAuthorization != "Bearer "+h.config.agentToken {
+		t.Fatalf("agent saw Authorization %q, want the configured desktop-agent token", gotAuthorization)
+	}
+}

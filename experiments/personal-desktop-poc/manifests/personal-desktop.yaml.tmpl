@@ -25,6 +25,28 @@ spec:
     storageClassName: "${STORAGE_CLASS}"
     volumeMode: Filesystem
 ---
+# In-cluster ClusterIP that forwards the typed-action port to the VM's
+# masquerade interface. The Gateway is the only intended caller; the agent
+# authenticates it with the derived desktop-agent bearer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: "${DESKTOP_NAME}-agent"
+  namespace: "${DESKTOP_NAMESPACE}"
+  labels:
+    app.kubernetes.io/name: personal-desktop
+    app.kubernetes.io/part-of: typeclaw-personal-desktop-poc
+    typeclaw.io/desktop-owner-key: "${OWNER_KEY}"
+    typeclaw.io/experimental: "true"
+spec:
+  selector:
+    kubevirt.io/domain: "${DESKTOP_NAME}"
+  ports:
+    - name: desktop-agent
+      protocol: TCP
+      port: 9876
+      targetPort: 9876
+---
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
@@ -68,6 +90,12 @@ spec:
           interfaces:
             - name: default
               masquerade: {}
+              # KubeVirt masquerade port forwarding: the Service below reaches
+              # the guest desktop-agent only through this declared port.
+              ports:
+                - name: desktop-agent
+                  protocol: TCP
+                  port: 9876
         features:
           acpi: {}
         machine:
@@ -108,6 +136,9 @@ spec:
                 - firefox
                 - lightdm
                 - qemu-guest-agent
+                - scrot
+                - wmctrl
+                - xdotool
                 - xfce4
                 - xfce4-goodies
               write_files:
@@ -119,6 +150,34 @@ spec:
                     autologin-user-timeout=0
                     user-session=xfce
                     xserver-command=X -s 0 -dpms
+                # The TypeClaw computer-use agent runs inside the XFCE session
+                # (autostart below) so DISPLAY=:0 and the session keyring are
+                # available. The Python source is injected by
+                # scripts/render-personal-desktop.sh from
+                # ../desktop-agent/desktop-agent.py.
+                - path: /usr/local/bin/desktop-agent.py
+                  owner: root:root
+                  permissions: "0755"
+                  content: |
+__DESKTOP_AGENT_PYTHON__
+                # WARNING: the derived token is readable by anyone who can
+                # read this VM spec in the namespace. Acceptable PoC
+                # exposure; production must deliver it through a Secret
+                # mechanism, not cloud-init userData.
+                - path: /etc/personal-desktop/agent-token
+                  owner: desktop:desktop
+                  permissions: "0600"
+                  content: "${DESKTOP_AGENT_TOKEN}"
+                - path: /home/desktop/.config/autostart/typeclaw-desktop-agent.desktop
+                  owner: desktop:desktop
+                  permissions: "0644"
+                  content: |
+                    [Desktop Entry]
+                    Type=Application
+                    Name=TypeClaw Desktop Agent
+                    Comment=Typed computer-use actions for the TypeClaw agent
+                    Exec=/usr/local/bin/desktop-agent.py
+                    Terminal=false
               bootcmd:
                 - [sh, -c, "echo 'lightdm shared/default-x-display-manager select lightdm' | debconf-set-selections"]
               runcmd:

@@ -13,10 +13,6 @@ const configSchema = z.object({
     .string()
     .regex(/^[A-Z][A-Z0-9_]*$/)
     .default("PERSONAL_DESKTOP_AGENT_TOKEN"),
-  browserSession: z
-    .string()
-    .regex(/^[a-zA-Z0-9_-]+$/)
-    .default("personal-desktop-computer-use"),
   screenshotMaxWidth: z.number().int().min(320).max(1600).default(1024),
   screenshotMaxBytes: z.number().int().min(50_000).max(190_000).default(180_000),
 });
@@ -24,21 +20,23 @@ const configSchema = z.object({
 const CONTROL_PERMISSION = "security.bypass.personalDesktopControl";
 const GATEWAY_STATUS_TIMEOUT_MS = 8_000;
 const GATEWAY_SCREENSHOT_TIMEOUT_MS = 15_000;
+const GATEWAY_ACTION_TIMEOUT_MS = 12_000;
+const GATEWAY_TYPE_TIMEOUT_MS = 32_000;
 const GATEWAY_POWER_TIMEOUT_MS = 20_000;
-const SERIALIZED_OPERATION_TIMEOUT_MS = 30_000;
-const AGENT_BROWSER_ABORT_GRACE_MS = 250;
-const DESKTOP_TOOL_NAMES = new Set([
-  "desktop_status",
-  "desktop_acquire",
-  "desktop_observe",
-  "desktop_click",
-  "desktop_type",
-  "desktop_key",
-  "desktop_scroll",
-  "desktop_power",
-  "desktop_release",
-]);
-
+const SERIALIZED_OPERATION_TIMEOUT_MS = 45_000;
+const DESKTOP_TOOL_NAMES: Record<string, true> = {
+  desktop_status: true,
+  desktop_acquire: true,
+  desktop_observe: true,
+  desktop_click: true,
+  desktop_type: true,
+  desktop_key: true,
+  desktop_scroll: true,
+  desktop_launch: true,
+  desktop_windows: true,
+  desktop_power: true,
+  desktop_release: true,
+};
 type PluginConfig = z.infer<typeof configSchema>;
 type GatewayStatus = {
   desktopName: string;
@@ -54,7 +52,6 @@ type GatewayStatus = {
   powerRecoveryRequired?: boolean;
 };
 
-type BrowserBox = { x: number; y: number; width: number; height: number };
 type Frame = {
   bytes: Uint8Array;
   mimeType: string;
@@ -136,27 +133,6 @@ export function observationIsFresh(
     current.vmiUID === frame.vmiUID &&
     current.controlGeneration === frame.controlGeneration,
   );
-}
-
-export function mapFramebufferPoint(
-  box: BrowserBox,
-  framebufferWidth: number,
-  framebufferHeight: number,
-  x: number,
-  y: number,
-): { x: number; y: number } {
-  if (box.width <= 0 || box.height <= 0) throw new Error("no positive noVNC canvas area");
-  const mapPixelCenter = (pixel: number, pixels: number, start: number, size: number) => {
-    const minimum = Math.ceil(start);
-    const maximum = Math.ceil(start + size) - 1;
-    if (maximum < minimum) throw new Error("no integer viewport coordinate inside the canvas");
-    const center = Math.floor(start + ((pixel + 0.5) / pixels) * size);
-    return Math.min(maximum, Math.max(minimum, center));
-  };
-  return {
-    x: mapPixelCenter(x, framebufferWidth, box.x, box.width),
-    y: mapPixelCenter(y, framebufferHeight, box.y, box.height),
-  };
 }
 
 export default definePlugin({
@@ -349,27 +325,6 @@ export default definePlugin({
       }
     };
 
-    const containAmbiguousInputForLease = async (
-      lease: LocalControlLease,
-      button?: "left" | "right" | "middle",
-    ): Promise<AmbiguousInputCleanup> => {
-      const cleanup = await containAmbiguousInput(config, button);
-      if (cleanup.connectionClosed) {
-        try {
-          await waitForAgentRelease(AbortSignal.timeout(3_000));
-          cleanup.gatewayReleaseConfirmed = true;
-        } catch (error) {
-          cleanup.errors.push(`Gateway release confirmation: ${String(error)}`);
-        }
-      }
-      if (cleanup.gatewayReleaseConfirmed) {
-        releaseLocalControl(lease);
-      } else {
-        quarantineLocalControl(lease, cleanup.errors.join("; ") || "Agent release was not confirmed");
-      }
-      return cleanup;
-    };
-
     const requireExistingControl = async (signal?: AbortSignal): Promise<GatewayStatus> => {
       requirePowerCertain();
       const current = await status(signal);
@@ -384,19 +339,13 @@ export default definePlugin({
           "ControlRequired: call desktop_acquire, then desktop_observe, before sending input.",
         );
       }
-      try {
-        await browserBox(config, signal);
-        await runAgentBrowser(config, ["wait", '#screen[data-control-connected="true"]'], signal);
-      } catch {
-        throw new Error("ControlBusy: another agent connection owns input control.");
-      }
       return current;
     };
 
     const ensureControl = async (
       lease: LocalControlLease,
       signal?: AbortSignal,
-    ): Promise<GatewayStatus> => {
+    ): Promise<Record<string, unknown>> => {
       requirePowerCertain();
       const current = await status(signal);
       requireGatewayControlAvailable(current);
@@ -429,52 +378,56 @@ export default definePlugin({
             "ControlCleanupRequired: Agent control changed outside this TypeClaw session. Call desktop_release before reacquiring.",
           );
         }
-        return existing;
+        return current as unknown as Record<string, unknown>;
       }
 
-      // A newly opened RFB connection changes input authority. Invalidate
-      // explicitly as well as comparing the wire generation so a Gateway
-      // restart cannot create an ABA match with a retained observation.
       invalidateAllObservations();
-      const headers = JSON.stringify(agentHeaders(config));
       try {
-        await runAgentBrowser(config, ["--headers", headers, "open", config.gatewayUrl], signal);
-        // `--headers` is origin-scoped Fetch interception and does not cover the
-        // noVNC WebSocket handshake in agent-browser 0.33.0. This dedicated
-        // session also needs CDP Network extra headers before opening control.
-        await runAgentBrowser(config, ["set", "headers", headers], signal);
-        await runAgentBrowser(config, ["set", "viewport", "1440", "900"], signal);
-        await runAgentBrowser(config, ["click", "#control"], signal);
-        await runAgentBrowser(config, ["wait", '#screen[data-control-connected="true"]'], signal);
-        await runAgentBrowser(config, ["focus", "#screen canvas"], signal);
-
-        const granted = await status(signal);
-        if (!granted.controlActive || granted.controlActor !== "agent") {
-          throw new Error("the Gateway did not grant the agent exclusive input control");
-        }
-        if (!granted.gatewayBootID || granted.controlGeneration === undefined) {
+        const granted = await gatewayJSON<Record<string, unknown>>(
+          config,
+          "/api/control/acquire",
+          { method: "POST" },
+          signal,
+          GATEWAY_STATUS_TIMEOUT_MS,
+        );
+        const bootID = granted.gatewayBootID;
+        const generation = granted.controlGeneration;
+        if (
+          typeof bootID !== "string" ||
+          bootID.length === 0 ||
+          typeof generation !== "number" ||
+          !Number.isSafeInteger(generation) ||
+          generation < 0
+        ) {
           throw new Error("the Gateway omitted the controller generation after acquire");
         }
         lease.controlEstablished = true;
-        lease.gatewayBootID = granted.gatewayBootID;
-        lease.controlGeneration = granted.controlGeneration;
+        lease.gatewayBootID = bootID;
+        lease.controlGeneration = generation;
         return granted;
       } catch (error) {
         invalidateAllObservations();
+        // A definitive rejection means no lease of ours exists; nothing to
+        // clean up. An ambiguous dispatch (lost response) may have created a
+        // Gateway lease that this local lease cannot adopt, so try to release
+        // it and quarantine only if the cleanup is not confirmed.
+        const ambiguous =
+          error instanceof GatewayHTTPError && error.body.outcome === "UnknownOutcome";
+        if (!ambiguous) throw error;
         const cleanupErrors: string[] = [];
         try {
-          await closeBrowser(config, AbortSignal.timeout(2_000));
+          await releaseAgentRequest(config, AbortSignal.timeout(3_000));
         } catch (cleanupError) {
-          cleanupErrors.push(`close: ${String(cleanupError)}`);
+          cleanupErrors.push(`release: ${String(cleanupError)}`);
         }
         try {
           await waitForAgentRelease(AbortSignal.timeout(3_000));
         } catch (cleanupError) {
-          cleanupErrors.push(`release: ${String(cleanupError)}`);
+          cleanupErrors.push(`release confirmation: ${String(cleanupError)}`);
         }
-        const cause = error instanceof Error ? error : new Error(String(error));
         const cleanup = cleanupErrors.length === 0 ? "cleanup confirmed" : cleanupErrors.join("; ");
         if (cleanupErrors.length > 0) quarantineLocalControl(lease, cleanup);
+        const cause = error instanceof Error ? error : new Error(String(error));
         throw new Error(`ControlSetupFailed: ${cause.message}; ${cleanup}`, { cause });
       }
     };
@@ -511,14 +464,14 @@ export default definePlugin({
                 if (localControl !== lease) return;
                 const cleanupErrors: string[] = [];
                 try {
-                  await closeBrowser(config, operationSignal);
+                  await releaseAgentRequest(config, operationSignal);
                 } catch (error) {
-                  cleanupErrors.push(`close: ${String(error)}`);
+                  cleanupErrors.push(`release: ${String(error)}`);
                 }
                 try {
                   await waitForAgentRelease(operationSignal);
                 } catch (error) {
-                  cleanupErrors.push(`release: ${String(error)}`);
+                  cleanupErrors.push(`release confirmation: ${String(error)}`);
                 }
                 if (cleanupErrors.length > 0) throw new Error(cleanupErrors.join("; "));
                 releaseLocalControl(lease);
@@ -532,7 +485,7 @@ export default definePlugin({
           }
         },
         "tool.before": (event) => {
-          if (event.toolProvenance !== "plugin" || !DESKTOP_TOOL_NAMES.has(event.tool)) return;
+          if (event.toolProvenance !== "plugin" || !(event.tool in DESKTOP_TOOL_NAMES)) return;
           if (disposing) return { block: true, reason: "Personal Desktop plugin is disposing" };
           if (ctx.permissions.has(event.origin, CONTROL_PERMISSION)) return;
           return { block: true, reason: `missing ${CONTROL_PERMISSION}` };
@@ -606,7 +559,7 @@ export default definePlugin({
         },
         desktop_observe: {
           description:
-            "Capture the current XFCE framebuffer. Coordinates returned in details are the coordinate space for click actions.",
+            "Capture the current desktop screen through the guest agent. Coordinates in details are the coordinate space for click and scroll actions.",
           parameters: z.object({}),
           async execute(_args, toolCtx) {
             return serialized(toolCtx.signal, async (operationSignal) => {
@@ -640,7 +593,7 @@ export default definePlugin({
                 content: [
                   {
                     type: "text" as const,
-                    text: `Observation ${observationId}; framebuffer ${frame.framebufferWidth}×${frame.framebufferHeight}; encoded ${frame.encodedWidth}×${frame.encodedHeight}. Echo this observationId in exactly one input tool call.`,
+                    text: `Observation ${observationId}; screen ${frame.framebufferWidth}×${frame.framebufferHeight}; encoded ${frame.encodedWidth}×${frame.encodedHeight}. Echo this observationId in exactly one input tool call.`,
                   },
                   {
                     type: "image" as const,
@@ -655,7 +608,7 @@ export default definePlugin({
         },
         desktop_click: {
           description:
-            "Click absolute framebuffer coordinates using an existing agent control lease and the latest observationId. Never retry after an ambiguous connection failure.",
+            "Click absolute screen coordinates using an existing agent control lease and the latest observationId. Never retry after an ambiguous dispatch failure.",
           parameters: z.object({
             observationId: z.string().uuid(),
             x: z.number().int().nonnegative(),
@@ -665,88 +618,67 @@ export default definePlugin({
           }),
           fileOperands: { nonFile: ["observationId", "button"] },
           async execute(args, toolCtx) {
-            return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal, lease) => {
+            return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal) => {
               const observation = observationFor(toolCtx.sessionId);
               const current = await requireExistingControl(signal);
               const observed = requireFreshObservation(observation, current, args.observationId);
-              const [frame, box] = await Promise.all([
-                fetchFrame(config, signal),
-                browserBox(config, signal),
-              ]);
-              if (
-                frame.vmiUID !== observed.vmiUID ||
-                frame.controlGeneration !== observed.controlGeneration ||
-                frame.gatewayBootID !== observed.gatewayBootID ||
-                frame.framebufferWidth !== observed.framebufferWidth ||
-                frame.framebufferHeight !== observed.framebufferHeight
-              ) {
-                invalidateAllObservations();
-                throw new Error(
-                  "FreshObservationRequired: the framebuffer changed after the last observation.",
-                );
-              }
               if (args.x >= observed.framebufferWidth || args.y >= observed.framebufferHeight) {
                 throw new Error(
-                  `coordinates (${args.x}, ${args.y}) exceed framebuffer ${observed.framebufferWidth}×${observed.framebufferHeight}`,
+                  `coordinates (${args.x}, ${args.y}) exceed screen ${observed.framebufferWidth}×${observed.framebufferHeight}`,
                 );
               }
-              const viewport = mapFramebufferPoint(
-                box,
-                observed.framebufferWidth,
-                observed.framebufferHeight,
-                args.x,
-                args.y,
-              );
-              let buttonIsDown = false;
               try {
-                await runAgentBrowser(
+                const result = await gatewayJSON<Record<string, unknown>>(
                   config,
-                  ["mouse", "move", String(viewport.x), String(viewport.y)],
+                  "/api/agent/click",
+                  {
+                    method: "POST",
+                    body: JSON.stringify({
+                      x: args.x,
+                      y: args.y,
+                      button: args.button ?? "left",
+                      clicks: args.clicks ?? 1,
+                    }),
+                  },
                   signal,
+                  GATEWAY_ACTION_TIMEOUT_MS,
                 );
-                for (let index = 0; index < args.clicks; index += 1) {
-                  buttonIsDown = true;
-                  await runAgentBrowser(config, ["mouse", "down", args.button], signal);
-                  await runAgentBrowser(config, ["mouse", "up", args.button], signal);
-                  buttonIsDown = false;
-                }
+                invalidateAllObservations();
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: `Input applied at (${args.x}, ${args.y}). Observe before deciding whether it had the intended effect.`,
+                    },
+                  ],
+                  details: {
+                    dispatched: true,
+                    applied: result.applied === true,
+                    outcome: "Applied",
+                    retrySafe: false,
+                    x: args.x,
+                    y: args.y,
+                    button: args.button ?? "left",
+                    clicks: args.clicks ?? 1,
+                  },
+                };
               } catch (error) {
                 invalidateAllObservations();
-                const cleanup = await containAmbiguousInputForLease(
-                  lease,
-                  buttonIsDown ? args.button : undefined,
-                );
-                return unknownOutcome("click", error, cleanup);
+                return handleActionFailure("click", error);
               }
-              invalidateAllObservations();
-              return {
-                content: [
-                  {
-                    type: "text",
-                    text: `Input dispatched at (${args.x}, ${args.y}). Observe before deciding whether it succeeded.`,
-                  },
-                ],
-                details: {
-                  dispatched: true,
-                  x: args.x,
-                  y: args.y,
-                  outcome: "Unconfirmed",
-                  retrySafe: false,
-                },
-              };
             });
           },
         },
         desktop_type: {
           description:
-            "Type text with real key events into the currently focused guest application. Input effects remain unconfirmed until observe.",
+            "Type text with real key events into the currently focused guest application. Input effects remain to be confirmed by the next observe.",
           parameters: z.object({
             observationId: z.string().uuid(),
             text: z.string().min(1).max(4000),
           }),
           fileOperands: { nonFile: ["observationId", "text"] },
           async execute({ observationId, text }, toolCtx) {
-            return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal, lease) => {
+            return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal) => {
               const observation = observationFor(toolCtx.sessionId);
               requireFreshObservation(
                 observation,
@@ -754,23 +686,32 @@ export default definePlugin({
                 observationId,
               );
               try {
-                await runAgentBrowser(config, ["focus", "#screen canvas"], signal);
-                await runAgentBrowser(config, ["keyboard", "type", text], signal);
+                const result = await gatewayJSON<Record<string, unknown>>(
+                  config,
+                  "/api/agent/type",
+                  { method: "POST", body: JSON.stringify({ text }) },
+                  signal,
+                  GATEWAY_TYPE_TIMEOUT_MS,
+                );
+                invalidateAllObservations();
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: `Typed ${[...text].length} character(s). Observe before continuing.`,
+                    },
+                  ],
+                  details: {
+                    dispatched: true,
+                    applied: result.applied === true,
+                    outcome: "Applied",
+                    retrySafe: false,
+                  },
+                };
               } catch (error) {
                 invalidateAllObservations();
-                const cleanup = await containAmbiguousInputForLease(lease);
-                return unknownOutcome("type", error, cleanup);
+                return handleActionFailure("type", error);
               }
-              invalidateAllObservations();
-              return {
-                content: [
-                  {
-                    type: "text",
-                    text: `Typed ${[...text].length} character(s). Observe before continuing.`,
-                  },
-                ],
-                details: { dispatched: true, outcome: "Unconfirmed", retrySafe: false },
-              };
             });
           },
         },
@@ -787,7 +728,7 @@ export default definePlugin({
           }),
           fileOperands: { nonFile: ["observationId", "key"] },
           async execute({ observationId, key }, toolCtx) {
-            return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal, lease) => {
+            return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal) => {
               const observation = observationFor(toolCtx.sessionId);
               requireFreshObservation(
                 observation,
@@ -795,26 +736,35 @@ export default definePlugin({
                 observationId,
               );
               try {
-                await runAgentBrowser(config, ["focus", "#screen canvas"], signal);
-                await runAgentBrowser(config, ["press", key], signal);
+                const result = await gatewayJSON<Record<string, unknown>>(
+                  config,
+                  "/api/agent/key",
+                  { method: "POST", body: JSON.stringify({ key }) },
+                  signal,
+                  GATEWAY_ACTION_TIMEOUT_MS,
+                );
+                invalidateAllObservations();
+                return {
+                  content: [
+                    { type: "text", text: `Key ${key} applied. Observe before continuing.` },
+                  ],
+                  details: {
+                    dispatched: true,
+                    applied: result.applied === true,
+                    outcome: "Applied",
+                    retrySafe: false,
+                  },
+                };
               } catch (error) {
                 invalidateAllObservations();
-                const cleanup = await containAmbiguousInputForLease(lease);
-                return unknownOutcome("key", error, cleanup);
+                return handleActionFailure("key", error);
               }
-              invalidateAllObservations();
-              return {
-                content: [
-                  { type: "text", text: `Key ${key} dispatched. Observe before continuing.` },
-                ],
-                details: { dispatched: true, outcome: "Unconfirmed", retrySafe: false },
-              };
             });
           },
         },
         desktop_scroll: {
           description:
-            "Move to absolute framebuffer coordinates and send a relative mouse-wheel event using the latest observationId.",
+            "Move to absolute screen coordinates and send a relative mouse-wheel event using the latest observationId.",
           parameters: z.object({
             observationId: z.string().uuid(),
             x: z.number().int().nonnegative(),
@@ -824,68 +774,108 @@ export default definePlugin({
           }),
           fileOperands: { nonFile: ["observationId"] },
           async execute({ observationId, x, y, deltaY, deltaX }, toolCtx) {
-            return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal, lease) => {
+            return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal) => {
               const observation = observationFor(toolCtx.sessionId);
               const observed = requireFreshObservation(
                 observation,
                 await requireExistingControl(signal),
                 observationId,
               );
-              const [frame, box] = await Promise.all([
-                fetchFrame(config, signal),
-                browserBox(config, signal),
-              ]);
-              if (
-                frame.vmiUID !== observed.vmiUID ||
-                frame.controlGeneration !== observed.controlGeneration ||
-                frame.gatewayBootID !== observed.gatewayBootID ||
-                frame.framebufferWidth !== observed.framebufferWidth ||
-                frame.framebufferHeight !== observed.framebufferHeight
-              ) {
-                invalidateAllObservations();
-                throw new Error(
-                  "FreshObservationRequired: the framebuffer changed after the last observation.",
-                );
-              }
               if (x >= observed.framebufferWidth || y >= observed.framebufferHeight) {
                 throw new Error(
-                  `coordinates (${x}, ${y}) exceed framebuffer ${observed.framebufferWidth}×${observed.framebufferHeight}`,
+                  `coordinates (${x}, ${y}) exceed screen ${observed.framebufferWidth}×${observed.framebufferHeight}`,
                 );
               }
-              const viewport = mapFramebufferPoint(
-                box,
-                observed.framebufferWidth,
-                observed.framebufferHeight,
-                x,
-                y,
-              );
               try {
-                await runAgentBrowser(
+                const result = await gatewayJSON<Record<string, unknown>>(
                   config,
-                  ["mouse", "move", String(viewport.x), String(viewport.y)],
+                  "/api/agent/scroll",
+                  { method: "POST", body: JSON.stringify({ x, y, deltaX, deltaY }) },
                   signal,
+                  GATEWAY_ACTION_TIMEOUT_MS,
                 );
-                await runAgentBrowser(
-                  config,
-                  ["mouse", "wheel", String(deltaY), String(deltaX)],
-                  signal,
-                );
+                invalidateAllObservations();
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: `Wheel input applied at (${x}, ${y}). Observe before continuing.`,
+                    },
+                  ],
+                  details: {
+                    dispatched: true,
+                    applied: result.applied === true,
+                    outcome: "Applied",
+                    retrySafe: false,
+                    x,
+                    y,
+                  },
+                };
               } catch (error) {
                 invalidateAllObservations();
-                const cleanup = await containAmbiguousInputForLease(lease);
-                return unknownOutcome("scroll", error, cleanup);
+                return handleActionFailure("scroll", error);
               }
-              invalidateAllObservations();
-              return {
-                content: [
-                  {
-                    type: "text",
-                    text: `Wheel input dispatched at (${x}, ${y}). Observe before continuing.`,
-                  },
-                ],
-                details: { dispatched: true, x, y, outcome: "Unconfirmed", retrySafe: false },
-              };
             });
+          },
+        },
+        desktop_launch: {
+          description:
+            "Launch an installed application on the desktop, such as firefox, terminal, or files. Requires an agent control lease but no observation; observe afterwards to see the result.",
+          parameters: z.object({
+            app: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
+          }),
+          fileOperands: { nonFile: ["app"] },
+          async execute({ app }, toolCtx) {
+            return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal) => {
+              await requireExistingControl(signal);
+              try {
+                const result = await gatewayJSON<Record<string, unknown>>(
+                  config,
+                  "/api/agent/launch",
+                  { method: "POST", body: JSON.stringify({ app }) },
+                  signal,
+                  GATEWAY_ACTION_TIMEOUT_MS,
+                );
+                invalidateAllObservations();
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: `Launch request applied for ${app}. Observe before continuing.`,
+                    },
+                  ],
+                  details: {
+                    dispatched: true,
+                    applied: result.applied === true,
+                    outcome: "Applied",
+                    retrySafe: false,
+                    app,
+                  },
+                };
+              } catch (error) {
+                invalidateAllObservations();
+                return handleActionFailure("launch", error);
+              }
+            });
+          },
+        },
+        desktop_windows: {
+          description:
+            "List the titles of top-level application windows currently on the desktop. View-only; it does not require or grant input control.",
+          parameters: z.object({}),
+          async execute(_args, toolCtx) {
+            const result = await gatewayJSON<{ windows?: Array<Record<string, unknown>> }>(
+              config,
+              "/api/agent/windows",
+              undefined,
+              toolCtx.signal,
+              GATEWAY_ACTION_TIMEOUT_MS,
+            );
+            const windows = Array.isArray(result.windows) ? result.windows : [];
+            return {
+              content: [{ type: "text", text: JSON.stringify(windows, null, 2) }],
+              details: { windows },
+            };
           },
         },
         desktop_power: {
@@ -944,7 +934,7 @@ export default definePlugin({
                   );
                 }
                 if (action === "stop") {
-                  await closeBrowser(config, boundedOperationSignal);
+                  await releaseAgentRequest(config, boundedOperationSignal);
                   await waitForControlRelease(boundedOperationSignal);
                   controlReleaseConfirmed = true;
                 }
@@ -1020,7 +1010,7 @@ export default definePlugin({
                     "ControlLeaseChanged: the quarantined controller changed before cleanup",
                   );
                 }
-                await closeBrowser(config, operationSignal);
+                await releaseAgentRequest(config, operationSignal);
                 invalidateAllObservations();
                 await waitForAgentRelease(operationSignal);
                 releaseLocalControl(orphanedLease);
@@ -1040,7 +1030,7 @@ export default definePlugin({
             try {
               return await serialized(signal, async (operationSignal) => {
                 assertCurrentLease(lease, true);
-                await closeBrowser(config, operationSignal);
+                await releaseAgentRequest(config, operationSignal);
                 invalidateAllObservations();
                 await waitForAgentRelease(operationSignal);
                 releaseLocalControl(lease);
@@ -1078,10 +1068,10 @@ export default definePlugin({
         }
         const cleanupSignal = AbortSignal.timeout(6_000);
         try {
-          await closeBrowser(config, cleanupSignal);
+          await releaseAgentRequest(config, cleanupSignal);
           await waitForAgentRelease(cleanupSignal);
         } catch (error) {
-          ctx.logger.warn(`failed to release Personal Desktop browser session: ${String(error)}`);
+          ctx.logger.warn(`failed to release Personal Desktop agent control: ${String(error)}`);
         } finally {
           if (lease) releaseLocalControl(lease);
         }
@@ -1116,43 +1106,16 @@ function agentHeaders(config: PluginConfig): Record<string, string> {
   };
 }
 
-type AmbiguousInputCleanup = {
-  mouseUpAttempted: boolean;
-  mouseUpConfirmed: boolean;
-  connectionClosed: boolean;
-  gatewayReleaseConfirmed: boolean;
-  errors: string[];
-};
-
-async function containAmbiguousInput(
-  config: PluginConfig,
-  button?: "left" | "right" | "middle",
-): Promise<AmbiguousInputCleanup> {
-  const cleanup: AmbiguousInputCleanup = {
-    mouseUpAttempted: Boolean(button),
-    mouseUpConfirmed: false,
-    connectionClosed: false,
-    gatewayReleaseConfirmed: false,
-    errors: [],
-  };
-  if (button) {
-    try {
-      await runAgentBrowser(config, ["mouse", "up", button], AbortSignal.timeout(1_500));
-      cleanup.mouseUpConfirmed = true;
-    } catch (error) {
-      cleanup.errors.push(`mouse-up cleanup: ${String(error)}`);
-    }
+function handleActionFailure(action: string, error: unknown): never | {
+  content: Array<{ type: "text"; text: string }>;
+  details: Record<string, unknown>;
+} {
+  // A Gateway-authored UnknownOutcome means the dispatch may or may not have
+  // reached the guest agent. The lease is kept; the next observe resolves the
+  // ambiguity. Every other failure is a definitive non-applied result.
+  if (!(error instanceof GatewayHTTPError) || error.body.outcome !== "UnknownOutcome") {
+    throw error;
   }
-  try {
-    await closeBrowser(config, AbortSignal.timeout(2_000));
-    cleanup.connectionClosed = true;
-  } catch (error) {
-    cleanup.errors.push(`connection cleanup: ${String(error)}`);
-  }
-  return cleanup;
-}
-
-function unknownOutcome(action: string, error: unknown, cleanup: AmbiguousInputCleanup) {
   const message = error instanceof Error ? error.message : String(error);
   return {
     content: [
@@ -1166,7 +1129,6 @@ function unknownOutcome(action: string, error: unknown, cleanup: AmbiguousInputC
       outcome: "UnknownOutcome",
       retrySafe: false,
       error: message,
-      cleanup,
     },
   };
 }
@@ -1204,18 +1166,29 @@ async function gatewayJSON<T>(
   path: string,
   init?: RequestInit,
   signal?: AbortSignal,
+  timeoutMs?: number,
 ): Promise<T> {
   const headers = new Headers(init?.headers);
   for (const [name, value] of Object.entries(agentHeaders(config))) headers.set(name, value);
-  const timeoutMs = init?.method === "POST" ? GATEWAY_POWER_TIMEOUT_MS : GATEWAY_STATUS_TIMEOUT_MS;
+  const timeout = timeoutMs ?? (init?.method === "POST" ? GATEWAY_POWER_TIMEOUT_MS : GATEWAY_STATUS_TIMEOUT_MS);
   const response = await fetch(`${config.gatewayUrl}${path}`, {
     ...init,
     headers,
-    signal: withDeadlineSignal(signal, timeoutMs),
+    signal: withDeadlineSignal(signal, timeout),
   });
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) throw gatewayFailure(response, body);
   return body as T;
+}
+
+async function releaseAgentRequest(config: PluginConfig, signal?: AbortSignal): Promise<void> {
+  await gatewayJSON<Record<string, unknown>>(
+    config,
+    "/api/control/release",
+    { method: "POST" },
+    signal,
+    GATEWAY_STATUS_TIMEOUT_MS,
+  );
 }
 
 async function fetchFrame(config: PluginConfig, signal?: AbortSignal): Promise<Frame> {
@@ -1225,7 +1198,8 @@ async function fetchFrame(config: PluginConfig, signal?: AbortSignal): Promise<F
     maxBytes: String(config.screenshotMaxBytes),
     quality: "65",
   });
-  const response = await fetch(`${config.gatewayUrl}/api/screenshot?${query}`, {
+  const response = await fetch(`${config.gatewayUrl}/api/agent/screenshot?${query}`, {
+    method: "POST",
     headers: agentHeaders(config),
     signal: withDeadlineSignal(signal, GATEWAY_SCREENSHOT_TIMEOUT_MS),
   });
@@ -1286,111 +1260,26 @@ function requiredHeaderNonNegativeInt(response: Response, name: string): number 
   return value;
 }
 
-async function browserBox(config: PluginConfig, signal?: AbortSignal): Promise<BrowserBox> {
-  const output = await runAgentBrowser(config, ["--json", "get", "box", "#screen canvas"], signal);
-  const result = JSON.parse(output) as {
-    success?: boolean;
-    data?: Partial<BrowserBox>;
-    error?: string;
-  };
-  const box = result.data;
-  const x = box?.x;
-  const y = box?.y;
-  const width = box?.width;
-  const height = box?.height;
-  if (
-    !result.success ||
-    ![x, y, width, height].every((value) => typeof value === "number" && Number.isFinite(value)) ||
-    typeof width !== "number" ||
-    typeof height !== "number" ||
-    width <= 0 ||
-    height <= 0
-  ) {
-    throw new Error(result.error || "no active noVNC canvas");
-  }
-  return { x: x as number, y: y as number, width, height };
-}
-
 function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(done, milliseconds);
-    signal?.addEventListener("abort", aborted, { once: true });
-    function done() {
-      signal?.removeEventListener("abort", aborted);
-      resolve();
-    }
-    function aborted() {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const timer = setTimeout(resolve, milliseconds);
+  signal?.addEventListener(
+    "abort",
+    () => {
       clearTimeout(timer);
-      reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
-    }
-  });
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    },
+    { once: true },
+  );
+  return promise;
 }
 
 function waitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   signal.throwIfAborted();
-  return new Promise<T>((resolve, reject) => {
-    const aborted = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
-    signal.addEventListener("abort", aborted, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
-  });
-}
-
-async function runAgentBrowser(
-  config: PluginConfig,
-  args: string[],
-  signal?: AbortSignal,
-): Promise<string> {
-  signal?.throwIfAborted();
-  const processHandle = Bun.spawn({
-    cmd: ["agent-browser", "--session", config.browserSession, ...args],
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env },
-  });
-  const abort = () => processHandle.kill();
-  signal?.addEventListener("abort", abort, { once: true });
-  if (signal?.aborted) abort();
-  const completion = Promise.all([
-    processHandle.exited,
-    new Response(processHandle.stdout).text(),
-    new Response(processHandle.stderr).text(),
-  ]);
-  try {
-    const [exitCode, output, errorOutput] = signal
-      ? await waitWithSignal(completion, signal)
-      : await completion;
-    if (exitCode !== 0)
-      throw new Error(errorOutput.trim() || output.trim() || `agent-browser exited ${exitCode}`);
-    return output.trim();
-  } catch (error) {
-    if (signal?.aborted) {
-      processHandle.kill();
-      try {
-        await waitWithSignal(completion, AbortSignal.timeout(AGENT_BROWSER_ABORT_GRACE_MS));
-      } catch {
-        try {
-          processHandle.kill(9);
-        } catch {
-          // The process may already have exited between the grace timeout and SIGKILL.
-        }
-        try {
-          await waitWithSignal(completion, AbortSignal.timeout(AGENT_BROWSER_ABORT_GRACE_MS));
-        } catch {
-          // The queue is bounded even if the OS never reports exit for a killed child.
-        }
-      }
-    }
-    throw error;
-  } finally {
-    signal?.removeEventListener("abort", abort);
-  }
-}
-
-async function closeBrowser(config: PluginConfig, signal?: AbortSignal): Promise<void> {
-  try {
-    await runAgentBrowser(config, ["close"], signal);
-  } catch (error) {
-    if (!String(error).includes("No active")) throw error;
-  }
+  const { promise: tracked, resolve, reject } = Promise.withResolvers<T>();
+  const aborted = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+  signal.addEventListener("abort", aborted, { once: true });
+  promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
+  return tracked;
 }
