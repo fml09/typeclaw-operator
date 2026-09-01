@@ -46,7 +46,7 @@ Human browser ── OIDC reverse proxy ──┐
                                       │ KubeVirt subresources     │ masquerade port
                                       ▼                           ▼
                            KubeVirt VMI native VNC      desktop-agent (VM 내부, X11)
-                                      │                 ├─ click/type/key/scroll/launch
+                                      │                 ├─ ordered click/type/key/scroll batches + launch
                               Ubuntu 24.04 + XFCE        ├─ screenshot/windows
                                       │                 └─ X11 실제 화면 기준 응답
                          user-owned whole-root DataVolume/PVC
@@ -78,7 +78,7 @@ KubeVirt/QEMU native VNC를 사용하므로 guest에 public VNC server나 reusab
 - [`scripts/render-platform.sh`](./scripts/render-platform.sh): platform/golden image YAML을 stdout으로 render
 - [`scripts/render-personal-desktop.sh`](./scripts/render-personal-desktop.sh): owner tuple에서 사용자별 YAML을 stdout으로 render
 - [`scripts/derive-agent-token.sh`](./scripts/derive-agent-token.sh): signing key에서 정확한 owner tuple에만 유효한 Agent bearer를 파생
-- [`typeclaw-plugin/`](./typeclaw-plugin): status/acquire/observe/click/type/key/scroll/launch/windows/power/release tools를 제공하는 TypeClaw plugin
+- [`typeclaw-plugin/`](./typeclaw-plugin): status/acquire/observe/act/launch/windows/power/release tools를 제공하는 TypeClaw plugin
 - [`desktop-agent/`](./desktop-agent): VM 내부에서 X11 typed action HTTP endpoint를 제공하는 Python agent
 - [`docs/research/persistent-linux-desktop-poc.md`](../../docs/research/persistent-linux-desktop-poc.md): Surf, KubeVirt, CDI, noVNC 근거와 version-aware 조사
 
@@ -234,16 +234,16 @@ Plugin은 다음 보장을 의도합니다.
 - tool argument에 `userId`, VM name, VNC URL을 받지 않습니다.
 - Gateway credential이 고정 owner tuple에 bind되므로 model이 다른 사용자를 선택할 수 없습니다.
 - 모든 desktop tool은 TypeClaw의 `security.bypass.personalDesktopControl` permission을 확인합니다. 기본 owner에는 wildcard로 grant되고 그 밖의 role은 명시적으로 grant해야 합니다.
-- `desktop_observe`는 Gateway가 adaptive JPEG로 축소해 runtime의 private temp path에 저장하고 `imagePath`를 반환합니다. Base64 image를 text-only main model에 직접 보내지 않습니다.
-- 모델은 다음 tool round에서 TypeClaw의 first-party `look_at`을 정확히 그 path 하나에 호출해야 합니다. `look_at`은 `models.vision` profile로 화면을 읽고 text만 main model에 반환합니다. 성공한 matching 호출 전에는 input을 `VisionObservationRequired`로 거절합니다.
-- `desktop_observe`가 반환한 예측 불가능한 `observationId`를 vision 결과를 받은 다음 inference의 input tool이 echo해야 합니다. 새 frame의 ID를 같은 assistant batch에서 blind reference하거나 한 ID로 input을 두 번 보내는 것은 거절합니다. 이전의 유효한 ID와 새 observe를 같은 parallel batch에 섞으면 이전 input이 먼저 실행될 수 있으므로 두 tool을 같은 batch에 넣지 않습니다.
-- 정상 input 순서는 `desktop_acquire` → 별도 tool round의 `desktop_observe` → 반환된 `imagePath`에 대한 `look_at` → 다음 inference의 input 하나입니다. Input tool은 암묵적으로 control lease를 만들지 않습니다.
-- click/type/key/scroll은 하나씩 serialize합니다.
+- `desktop_observe`는 Gateway가 adaptive JPEG로 축소하고 TypeClaw tool의 `{type:"image", mimeType, data}` result로 image-capable main model에 직접 반환합니다. 별도 `look_at`/vision profile round와 runtime 임시 파일 write를 만들지 않습니다.
+- Main model은 image input을 지원해야 합니다. Screenshot raw byte cap은 최대 190,000 bytes이고 base64 result도 TypeClaw 기본 `tool-result-cap.imageMaxBytes=262,144` 아래인지 plugin이 다시 확인합니다. 더 낮은 custom cap이나 text-only main model은 이 fast path와 호환되지 않습니다.
+- `desktop_observe`가 반환한 예측 불가능한 `observationId`를 image를 받은 다음 inference의 `desktop_act`가 echo해야 합니다. 새 frame의 ID를 같은 assistant batch에서 blind reference하거나 한 ID로 `desktop_act`를 두 번 호출하는 것은 거절합니다. 이전의 유효한 ID와 새 observe를 같은 parallel batch에 섞으면 이전 input이 먼저 실행될 수 있으므로 두 tool을 같은 batch에 넣지 않습니다.
+- 정상 input 순서는 `desktop_acquire` → 별도 tool round의 `desktop_observe`(image result) → 다음 inference의 `desktop_act(actions[])` 하나입니다. Input tool은 암묵적으로 control lease를 만들지 않습니다.
+- `desktop_act`는 같은 관찰에서 결정할 수 있는 click/type/key/scroll을 최대 16개까지 ordered batch 하나로 serialize합니다. Guest는 모든 action을 먼저 검증한 뒤 실행하므로 잘못된 후속 action 때문에 앞선 입력만 적용되는 validation partial은 만들지 않습니다. 앞선 action으로 위치가 달라질 target은 batch에 넣지 않고 새로 observe합니다.
 - Agent control lease는 한 TypeClaw `sessionId`에만 귀속됩니다. 다른 session은 status/observe/windows는 할 수 있지만 acquire/input/release/power로 현재 writer를 가로채지 못하며, controller session이 끝나면 in-flight input을 cancel하고 Gateway release를 확인합니다. 이 access lease 종료는 VM이나 PVC를 삭제하지 않습니다.
 - Gateway release를 확인하지 못하면 local lease를 `Orphaned` quarantine으로 유지합니다. 새 session이나 plugin lifecycle은 기존 Agent controller를 암묵적으로 승계하지 않으며, `desktop_release`가 Gateway release를 확인한 뒤에만 새 acquire를 허용합니다.
 - Agent controller가 free일 때만 acquire합니다. Human controller는 preempt하지 않습니다.
-- `observationId`, Gateway boot ID, control generation, VMI가 바뀌거나 input을 보낸 뒤에는 새 `desktop_observe` 없이는 다음 input을 거절합니다. Gateway 재시작 뒤 generation 숫자가 우연히 재사용돼도 이전 frame을 인정하지 않습니다.
-- click/type/key/scroll/launch는 guest desktop-agent에서 실행되고 `applied` 결과를 반환합니다. 단 applied는 "X11 이벤트가 전달됐다"까지만 증명하므로 의도한 효과는 항상 다음 observe로 확인합니다. Transport 손실 같은 응답을 잃은 action은 `UnknownOutcome`이고 자동 replay하면 안 됩니다.
+- `observationId`, Gateway boot ID, control generation, VMI가 바뀌거나 input batch를 보낸 뒤에는 새 `desktop_observe` 없이는 다음 input을 거절합니다. Gateway 재시작 뒤 generation 숫자가 우연히 재사용돼도 이전 frame을 인정하지 않습니다.
+- `desktop_act`와 `desktop_launch`는 guest desktop-agent에서 실행 결과를 반환합니다. 전체 batch가 끝나면 `Applied`, 실행 중 action이 실패하면 completed index를 포함한 `Partial`, 응답을 잃으면 `UnknownOutcome`입니다. 어느 경우든 의도한 화면 효과는 다음 observe로 확인하고 partial/unknown batch를 자동 replay하지 않습니다.
 
 Permission은 caller admission을, owner-scoped Gateway token은 target binding을 담당합니다. 둘을 합쳐도 이 plugin은 한 owner 전용 TypeClaw runtime을 전제로 하므로 서로 다른 end user를 같은 runtime에 admission하는 구성에는 배포하면 안 됩니다.
 

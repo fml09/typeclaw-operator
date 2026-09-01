@@ -27,6 +27,14 @@ if [ "$1" = "getdisplaygeometry" ]; then
   echo "${FAKE_GEOMETRY:-1280 800}"
   exit 0
 fi
+case "$*" in
+  *"$FAKE_XDOTOOL_FAIL_MATCH"*)
+    if [ -n "$FAKE_XDOTOOL_FAIL_MATCH" ]; then
+      echo "simulated matched xdotool failure" >&2
+      exit 4
+    fi
+    ;;
+esac
 if [ -n "$FAKE_XDOTOOL_FAIL" ]; then
   echo "simulated xdotool failure" >&2
   exit 3
@@ -287,6 +295,64 @@ class DesktopAgentActionTests(FakeToolsTestCase):
         )
         self.assertIn("-l", self.argv_log_text())
 
+    def test_action_batch_validates_then_executes_in_order(self):
+        actions = [
+            {"type": "click", "x": 10, "y": 20, "button": "left", "clicks": 1},
+            {"type": "type", "text": "hello"},
+            {"type": "key", "key": "Enter"},
+        ]
+        self.assertEqual(
+            self.agent.action_batch({"actions": actions}),
+            {"applied": True, "outcome": "Applied",
+             "actionCount": 3, "completedActions": 3},
+        )
+        log = self.argv_log_text()
+        self.assertLess(log.index("mousemove --sync 10 20"), log.index("type --delay 6 -- hello"))
+        self.assertLess(log.index("type --delay 6 -- hello"), log.index("key -- Return"))
+
+    def test_action_batch_rejects_every_action_before_input(self):
+        with self.assertRaises(AgentError) as ctx:
+            self.agent.action_batch({"actions": [
+                {"type": "click", "x": 10, "y": 20, "button": "left"},
+                {"type": "key", "key": "Control+a;rm"},
+            ]})
+        self.assertEqual(ctx.exception.status, 400)
+        log = self.argv_log_text()
+        self.assertNotIn("mousemove", log)
+        self.assertNotIn("key --", log)
+
+    def test_action_batch_bounds_length(self):
+        with self.assertRaises(AgentError) as ctx:
+            self.agent.action_batch({"actions": []})
+        self.assertEqual(ctx.exception.status, 400)
+        with self.assertRaises(AgentError) as ctx:
+            self.agent.action_batch({
+                "actions": [{"type": "key", "key": "Tab"}]
+                * (desktop_agent.MAX_ACTIONS_PER_BATCH + 1),
+            })
+        self.assertEqual(ctx.exception.status, 400)
+
+        with self.assertRaises(AgentError) as ctx:
+            self.agent.action_batch({"actions": [
+                {"type": "type", "text": "x" * 3000},
+                {"type": "type", "text": "y" * 2000},
+            ]})
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_action_batch_reports_partial_failure_without_retry_permission(self):
+        self._setenv("FAKE_XDOTOOL_FAIL_MATCH", "key -- Return")
+        result = self.agent.action_batch({"actions": [
+            {"type": "type", "text": "hello"},
+            {"type": "key", "key": "Enter"},
+        ]})
+        self.assertEqual(result["applied"], False)
+        self.assertEqual(result["outcome"], "Partial")
+        self.assertEqual(result["actionCount"], 2)
+        self.assertEqual(result["completedActions"], 1)
+        self.assertEqual(result["failedActionIndex"], 1)
+        self.assertEqual(result["retrySafe"], False)
+        self.assertIn("simulated matched xdotool failure", result["error"])
+
     def test_screenshot_returns_png_and_cleans_temp_file(self):
         width, height, data = self.agent.screenshot()
         self.assertEqual((width, height), (1280, 800))
@@ -383,15 +449,21 @@ class DesktopAgentHTTPTests(FakeToolsTestCase):
              "screen": {"width": 1280, "height": 800}},
         )
 
-    def test_click_roundtrip_and_auth_rejection(self):
-        payload = {"x": 15, "y": 25, "button": "middle", "clicks": 1}
-        status, _, body = self._request("POST", "/click", payload=payload)
+    def test_actions_roundtrip_and_auth_rejection(self):
+        payload = {"actions": [
+            {"type": "click", "x": 15, "y": 25, "button": "middle", "clicks": 1},
+            {"type": "type", "text": "hello"},
+        ]}
+        status, _, body = self._request("POST", "/actions", payload=payload)
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body),
-                         {"applied": True, "x": 15, "y": 25, "button": "middle",
-                          "clicks": 1})
-        status, _, body = self._request("POST", "/click", token="not-the-token-not-the-token",
-                                        payload=payload)
+        self.assertEqual(
+            json.loads(body),
+            {"applied": True, "outcome": "Applied",
+             "actionCount": 2, "completedActions": 2},
+        )
+        status, _, body = self._request(
+            "POST", "/actions", token="not-the-token-not-the-token", payload=payload,
+        )
         self.assertEqual(status, 401)
         self.assertIn("error", json.loads(body))
 
@@ -416,36 +488,39 @@ class DesktopAgentHTTPTests(FakeToolsTestCase):
         self.assertEqual(status, 404)
 
     def test_wrong_method_405(self):
-        status, _, body = self._request("GET", "/click")
+        status, _, body = self._request("GET", "/actions")
         self.assertEqual(status, 405)
         self.assertIn("error", json.loads(body))
         status, _, _ = self._request("POST", "/windows", payload={})
         self.assertEqual(status, 405)
 
     def test_malformed_json_400(self):
-        status, _, body = self._request("POST", "/type", raw_body=b"{not json")
+        status, _, body = self._request("POST", "/actions", raw_body=b"{not json")
         self.assertEqual(status, 400)
         self.assertIn("error", json.loads(body))
 
     def test_non_object_json_400(self):
-        status, _, body = self._request("POST", "/type", raw_body=b"[1,2]")
+        status, _, body = self._request("POST", "/actions", raw_body=b"[1,2]")
         self.assertEqual(status, 400)
         self.assertIn("error", json.loads(body))
 
     def test_missing_content_length_413(self):
-        status, _, body = self._request("POST", "/type", raw_body=b"{}", content_length=None)
+        status, _, body = self._request("POST", "/actions", raw_body=b"{}", content_length=None)
         self.assertEqual(status, 413)
         self.assertIn("error", json.loads(body))
 
     def test_oversized_body_413(self):
-        status, _, body = self._request("POST", "/type", raw_body=b"x",
+        status, _, body = self._request("POST", "/actions", raw_body=b"x",
                                         content_length=desktop_agent.MAX_BODY_BYTES + 1)
         self.assertEqual(status, 413)
         self.assertIn("error", json.loads(body))
 
     def test_validation_error_via_http(self):
-        status, _, body = self._request("POST", "/click",
-                                        payload={"x": -5, "y": 0, "button": "left"})
+        status, _, body = self._request(
+            "POST",
+            "/actions",
+            payload={"actions": [{"type": "click", "x": -5, "y": 0, "button": "left"}]},
+        )
         self.assertEqual(status, 400)
         self.assertIn("error", json.loads(body))
 

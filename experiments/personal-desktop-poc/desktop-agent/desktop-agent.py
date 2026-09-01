@@ -41,6 +41,7 @@ DEFAULT_TYPE_DELAY_MS = 6
 
 MAX_BODY_BYTES = 1_000_000
 MAX_TEXT_CHARS = 4000
+MAX_ACTIONS_PER_BATCH = 16
 MAX_DELTA = 4000
 MAX_KEY_CHARS = 80
 SCROLL_STEP_PX = 120
@@ -91,10 +92,7 @@ ROUTES = {
     "/health": "GET",
     "/windows": "GET",
     "/screenshot": "POST",
-    "/click": "POST",
-    "/type": "POST",
-    "/key": "POST",
-    "/scroll": "POST",
+    "/actions": "POST",
     "/launch": "POST",
 }
 
@@ -159,8 +157,8 @@ class DesktopAgent:
         except ValueError:
             raise AgentError(500, f"unexpected getdisplaygeometry output: {out!r}") from None
 
-    def _require_on_screen(self, x, y):
-        width, height = self._geometry()
+    def _require_on_screen(self, x, y, geometry=None):
+        width, height = geometry if geometry is not None else self._geometry()
         if not (0 <= x < width and 0 <= y < height):
             raise AgentError(400, f"coordinates ({x},{y}) exceeds screen {width}x{height}")
 
@@ -190,7 +188,7 @@ class DesktopAgent:
             except FileNotFoundError:
                 pass
 
-    def click(self, payload):
+    def _prepare_click(self, payload, geometry=None):
         x = _int_field(payload, "x", minimum=0)
         y = _int_field(payload, "y", minimum=0)
         button = payload.get("button")
@@ -199,22 +197,20 @@ class DesktopAgent:
         clicks = payload.get("clicks", 1)
         if isinstance(clicks, bool) or clicks not in (1, 2):
             raise AgentError(400, "clicks must be 1 or 2")
-        self._require_on_screen(x, y)
-        self._run([self.xdotool, "mousemove", "--sync", str(x), str(y)])
-        self._run([self.xdotool, "click", "--repeat", str(clicks), "--delay", "100",
-                   BUTTON_NUMBERS[button]])
-        return {"applied": True, "x": x, "y": y, "button": button, "clicks": clicks}
+        self._require_on_screen(x, y, geometry)
+        return {"type": "click", "x": x, "y": y, "button": button, "clicks": clicks}
 
-    def type_text(self, payload):
+    @staticmethod
+    def _prepare_type(payload):
         text = payload.get("text")
         if not isinstance(text, str):
             raise AgentError(400, "text must be a string")
-        if len(text) > MAX_TEXT_CHARS:
-            raise AgentError(400, f"text must be at most {MAX_TEXT_CHARS} characters")
-        self._run([self.xdotool, "type", "--delay", str(self.type_delay_ms), "--", text])
-        return {"applied": True, "characters": len(text)}
+        if not text or len(text) > MAX_TEXT_CHARS:
+            raise AgentError(400, f"text must contain 1 to {MAX_TEXT_CHARS} characters")
+        return {"type": "type", "text": text}
 
-    def press_key(self, payload):
+    @staticmethod
+    def _prepare_key(payload):
         spec = payload.get("key")
         if not isinstance(spec, str) or len(spec) > MAX_KEY_CHARS or not KEY_SPEC_RE.match(spec):
             raise AgentError(400, f"key must match [A-Za-z0-9+_-]+ and be at most "
@@ -225,26 +221,128 @@ class DesktopAgent:
         modifiers = [MODIFIER_KEYS.get(token.lower(), token.lower()) for token in tokens[:-1]]
         last = tokens[-1]
         keysym = NAMED_KEYS.get(last.lower(), last)
-        normalized = "+".join(modifiers + [keysym])
-        self._run([self.xdotool, "key", "--", normalized])
-        return {"applied": True, "key": normalized}
+        return {"type": "key", "key": "+".join(modifiers + [keysym])}
 
-    def scroll(self, payload):
+    def _prepare_scroll(self, payload, geometry=None):
         x = _int_field(payload, "x", minimum=0)
         y = _int_field(payload, "y", minimum=0)
         delta_x = _int_field(payload, "deltaX", minimum=-MAX_DELTA, maximum=MAX_DELTA)
         delta_y = _int_field(payload, "deltaY", minimum=-MAX_DELTA, maximum=MAX_DELTA)
-        self._require_on_screen(x, y)
-        self._run([self.xdotool, "mousemove", "--sync", str(x), str(y)])
+        self._require_on_screen(x, y, geometry)
         wheels = []
         if delta_y != 0:
-            wheels.append(("5" if delta_y > 0 else "4", delta_y))
+            wheels.append(("5" if delta_y > 0 else "4", len(self._wheel_steps(delta_y))))
         if delta_x != 0:
-            wheels.append(("7" if delta_x > 0 else "6", delta_x))
-        for button, delta in wheels:
-            for _ in self._wheel_steps(delta):
-                self._run([self.xdotool, "click", button])
+            wheels.append(("7" if delta_x > 0 else "6", len(self._wheel_steps(delta_x))))
+        return {"type": "scroll", "x": x, "y": y, "wheels": wheels}
+
+    def _prepare_batch_action(self, payload, geometry):
+        if not isinstance(payload, dict):
+            raise AgentError(400, "each action must be an object")
+        action_type = payload.get("type")
+        if action_type == "click":
+            return self._prepare_click(payload, geometry)
+        if action_type == "type":
+            return self._prepare_type(payload)
+        if action_type == "key":
+            return self._prepare_key(payload)
+        if action_type == "scroll":
+            return self._prepare_scroll(payload, geometry)
+        raise AgentError(400, "action type must be one of click, type, key, scroll")
+
+    def _apply_prepared_action(self, action):
+        action_type = action["type"]
+        if action_type == "click":
+            self._run([self.xdotool, "mousemove", "--sync",
+                       str(action["x"]), str(action["y"])])
+            self._run([self.xdotool, "click", "--repeat", str(action["clicks"]),
+                       "--delay", "100", BUTTON_NUMBERS[action["button"]]])
+            return
+        if action_type == "type":
+            self._run([self.xdotool, "type", "--delay", str(self.type_delay_ms),
+                       "--", action["text"]])
+            return
+        if action_type == "key":
+            self._run([self.xdotool, "key", "--", action["key"]])
+            return
+        if action_type == "scroll":
+            self._run([self.xdotool, "mousemove", "--sync",
+                       str(action["x"]), str(action["y"])])
+            for button, steps in action["wheels"]:
+                for _ in range(steps):
+                    self._run([self.xdotool, "click", button])
+            return
+        raise AgentError(500, f"unsupported prepared action: {action_type!r}")
+
+    def click(self, payload):
+        action = self._prepare_click(payload)
+        self._apply_prepared_action(action)
+        return {"applied": True, "x": action["x"], "y": action["y"],
+                "button": action["button"], "clicks": action["clicks"]}
+
+    def type_text(self, payload):
+        action = self._prepare_type(payload)
+        self._apply_prepared_action(action)
+        return {"applied": True, "characters": len(action["text"])}
+
+    def press_key(self, payload):
+        action = self._prepare_key(payload)
+        self._apply_prepared_action(action)
+        return {"applied": True, "key": action["key"]}
+
+    def scroll(self, payload):
+        action = self._prepare_scroll(payload)
+        self._apply_prepared_action(action)
         return {"applied": True}
+
+    def action_batch(self, payload):
+        actions = payload.get("actions")
+        if not isinstance(actions, list):
+            raise AgentError(400, "actions must be an array")
+        if not 1 <= len(actions) <= MAX_ACTIONS_PER_BATCH:
+            raise AgentError(
+                400,
+                f"actions must contain 1 to {MAX_ACTIONS_PER_BATCH} entries",
+            )
+        total_text_chars = sum(
+            len(action["text"])
+            for action in actions
+            if isinstance(action, dict)
+            and action.get("type") == "type"
+            and isinstance(action.get("text"), str)
+        )
+        if total_text_chars > MAX_TEXT_CHARS:
+            raise AgentError(
+                400,
+                f"action batch may type at most {MAX_TEXT_CHARS} characters",
+            )
+        needs_geometry = any(
+            isinstance(action, dict) and action.get("type") in ("click", "scroll")
+            for action in actions
+        )
+        geometry = self._geometry() if needs_geometry else None
+        prepared = [self._prepare_batch_action(action, geometry) for action in actions]
+
+        for index, action in enumerate(prepared):
+            try:
+                self._apply_prepared_action(action)
+            except AgentError as exc:
+                return {
+                    "applied": False,
+                    "outcome": "Partial",
+                    "retrySafe": False,
+                    "actionCount": len(prepared),
+                    "completedActions": index,
+                    "failedActionIndex": index,
+                    "failedActionType": action["type"],
+                    "error": exc.message,
+                }
+        return {
+            "applied": True,
+            "outcome": "Applied",
+            "actionCount": len(prepared),
+            "completedActions": len(prepared),
+        }
 
     @staticmethod
     def _wheel_steps(delta):
@@ -283,14 +381,8 @@ class DesktopAgent:
         return {"windows": rows}
 
     def handle_action(self, path, payload):
-        if path == "/click":
-            return self.click(payload)
-        if path == "/type":
-            return self.type_text(payload)
-        if path == "/key":
-            return self.press_key(payload)
-        if path == "/scroll":
-            return self.scroll(payload)
+        if path == "/actions":
+            return self.action_batch(payload)
         if path == "/launch":
             return self.launch(payload)
         raise AgentError(404, f"not found: {path}")

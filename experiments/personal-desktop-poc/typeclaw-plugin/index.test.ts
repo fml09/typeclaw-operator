@@ -27,22 +27,17 @@ describe("observation freshness", () => {
     const observation = {
       frame,
       observationId: "f2a7c4ca-5197-4eaa-a2c8-4850f5123560",
-      mustObserve: false,
     };
 
     expect(observationIsFresh(observation, current, "same-batch-does-not-know-new-id")).toBe(false);
     expect(observationIsFresh(observation, current, observation.observationId)).toBe(true);
   });
 
-  test("rejects a capped image and a Gateway restart ABA", () => {
+  test("rejects a Gateway restart ABA", () => {
     const observation = {
       frame,
       observationId: "f2a7c4ca-5197-4eaa-a2c8-4850f5123560",
-      mustObserve: true,
     };
-    expect(observationIsFresh(observation, current, observation.observationId)).toBe(false);
-
-    observation.mustObserve = false;
     expect(
       observationIsFresh(
         observation,
@@ -56,12 +51,10 @@ describe("observation freshness", () => {
     const oldObservation = {
       frame,
       observationId: "a9042f98-6cd3-48b7-b79a-f9e64e4227c3",
-      mustObserve: false,
     };
     const newObservation = {
       frame,
       observationId: "ea658f02-c788-46a7-be92-946e544cf71f",
-      mustObserve: false,
     };
 
     // If input enters the serialized queue first, it may legitimately use the
@@ -119,7 +112,7 @@ describe("bounded desktop operations", () => {
 });
 
 type ToolResult = {
-  content: Array<{ type: string; text?: string }>;
+  content: Array<{ type: string; text?: string; mimeType?: string; data?: string }>;
   details: Record<string, unknown>;
 };
 type DesktopTool = {
@@ -129,7 +122,7 @@ type DesktopTool = {
 // this shape pins exactly what these tests assert.
 type PluginRuntime = {
   hooks: Record<
-    "session.end" | "tool.before" | "tool.after",
+    "session.end" | "tool.before",
     (event: unknown, ctx: never) => Promise<unknown>
   >;
   tools: Record<string, DesktopTool>;
@@ -154,8 +147,8 @@ interface HarnessOptions {
   acquireFailures?: number;
   releaseFailures?: number;
   statusFailuresAfterRelease?: number;
-  clickFailures?: number;
-  typeFailures?: number;
+  batchFailures?: number;
+  partialBatch?: boolean;
   powerResponse?: (action: "start" | "stop") => Response | Promise<Response>;
 }
 
@@ -176,8 +169,7 @@ async function createPluginHarness(options?: HarnessOptions): Promise<PluginHarn
   let acquireFailures = options?.acquireFailures ?? 0;
   let releaseFailures = options?.releaseFailures ?? 0;
   let statusFailures = 0;
-  let clickFailures = options?.clickFailures ?? 0;
-  let typeFailures = options?.typeFailures ?? 0;
+  let batchFailures = options?.batchFailures ?? 0;
   const requests: RecordedRequest[] = [];
   const warnings: string[] = [];
   const fetchSignals: Array<AbortSignal | null | undefined> = [];
@@ -201,17 +193,23 @@ async function createPluginHarness(options?: HarnessOptions): Promise<PluginHarn
         headers: { "Content-Type": "application/json" },
       });
 
-    if (path === "/api/agent/type") {
-      if (typeFailures > 0) {
-        typeFailures -= 1;
+    if (path === "/api/agent/actions") {
+      if (batchFailures > 0) {
+        batchFailures -= 1;
         return unknownOutcome(502);
       }
-      const parsed: unknown = JSON.parse(body);
-      let characters = 0;
-      if (parsed && typeof parsed === "object" && "text" in parsed && typeof parsed.text === "string") {
-        characters = parsed.text.length;
+      const parsed = JSON.parse(body) as { actions: Array<Record<string, unknown>> };
+      if (options?.partialBatch) {
+        return respond({
+          applied: false,
+          outcome: "Partial",
+          retrySafe: false,
+          actionCount: parsed.actions.length,
+          completedActions: 1,
+          failedActionIndex: 1,
+        });
       }
-      return respond({ applied: true, characters });
+      return respond({ applied: true, completedActions: parsed.actions.length });
     }
     if (path === "/api/me") {
       if (statusFailures > 0) {
@@ -265,24 +263,8 @@ async function createPluginHarness(options?: HarnessOptions): Promise<PluginHarn
         },
       });
     }
-    if (
-      path === "/api/agent/click" ||
-      path === "/api/agent/key" ||
-      path === "/api/agent/scroll" ||
-      path === "/api/agent/launch"
-    ) {
-      if (clickFailures > 0) {
-        clickFailures -= 1;
-        return unknownOutcome(502);
-      }
+    if (path === "/api/agent/launch") {
       return respond({ applied: true });
-    }
-    if (path === "/api/agent/type") {
-      if (typeFailures > 0) {
-        typeFailures -= 1;
-        return unknownOutcome(502);
-      }
-      return respond({ applied: true, characters: (JSON.parse(body) as { text: string }).text.length });
     }
     if (path === "/api/agent/windows") {
       return respond({ windows: [{ id: "0x03c00002", desktop: 0, title: "Firefox" }] });
@@ -346,34 +328,7 @@ async function acquire(harness: PluginHarness, sessionId = "session-a") {
 }
 
 async function observe(harness: PluginHarness, sessionId = "session-a") {
-  const observed = await harness.runtime.tools.desktop_observe.execute({}, toolContext(sessionId));
-  const callId = `vision-${String(observed.details.observationId)}`;
-  await harness.runtime.hooks["tool.before"](
-    {
-      tool: "look_at",
-      toolProvenance: "first-party",
-      sessionId,
-      callId,
-      args: {
-        images: [{ path: observed.details.imagePath }],
-        prompt: "Describe the current desktop and visible controls.",
-      },
-    },
-    {} as never,
-  );
-  await harness.runtime.hooks["tool.after"](
-    {
-      tool: "look_at",
-      sessionId,
-      callId,
-      result: {
-        content: [{ type: "text", text: "The XFCE desktop is visible." }],
-        details: { count: 1, text: "The XFCE desktop is visible." },
-      },
-    },
-    {} as never,
-  );
-  return observed;
+  return harness.runtime.tools.desktop_observe.execute({}, toolContext(sessionId));
 }
 
 describe("session-bound local control lease", () => {
@@ -518,7 +473,7 @@ describe("session-bound local control lease", () => {
 });
 
 describe("typed guest agent actions", () => {
-  test("text-only sessions must route observations through look_at before input", async () => {
+  test("an observation returns the image and directly unlocks one action batch", async () => {
     const harness = await createPluginHarness();
     try {
       await acquire(harness);
@@ -526,45 +481,19 @@ describe("typed guest agent actions", () => {
         {},
         toolContext("session-a"),
       );
-      expect(observed.content.some((part) => part.type === "image")).toBe(false);
-      expect(typeof observed.details.imagePath).toBe("string");
+      const image = observed.content.find((part) => part.type === "image");
+      expect(image).toEqual({
+        type: "image",
+        mimeType: "image/jpeg",
+        data: "/9j/2Q==",
+      });
+      expect(observed.details.imagePath).toBeUndefined();
 
-      await expect(
-        harness.runtime.tools.desktop_click.execute(
-          { observationId: observed.details.observationId, x: 10, y: 20 },
-          toolContext("session-a"),
-        ),
-      ).rejects.toThrow("VisionObservationRequired");
-
-      const callId = "vision-call";
-      await harness.runtime.hooks["tool.before"](
+      const result = await harness.runtime.tools.desktop_act.execute(
         {
-          tool: "look_at",
-          toolProvenance: "first-party",
-          sessionId: "session-a",
-          callId,
-          args: {
-            images: [{ path: observed.details.imagePath }],
-            prompt: "Describe the current desktop and visible controls.",
-          },
+          observationId: observed.details.observationId,
+          actions: [{ type: "click", x: 10, y: 20 }],
         },
-        {} as never,
-      );
-      await harness.runtime.hooks["tool.after"](
-        {
-          tool: "look_at",
-          sessionId: "session-a",
-          callId,
-          result: {
-            content: [{ type: "text", text: "The XFCE desktop is visible." }],
-            details: { count: 1, text: "The XFCE desktop is visible." },
-          },
-        },
-        {} as never,
-      );
-
-      const result = await harness.runtime.tools.desktop_click.execute(
-        { observationId: observed.details.observationId, x: 10, y: 20 },
         toolContext("session-a"),
       );
       expect(result.details.outcome).toBe("Applied");
@@ -577,62 +506,137 @@ describe("typed guest agent actions", () => {
     const harness = await createPluginHarness();
     try {
       await expect(
-        harness.runtime.tools.desktop_click.execute(
-          { observationId: "f2a7c4ca-5197-4eaa-a2c8-4850f5123560", x: 10, y: 10 },
+        harness.runtime.tools.desktop_act.execute(
+          {
+            observationId: "f2a7c4ca-5197-4eaa-a2c8-4850f5123560",
+            actions: [{ type: "click", x: 10, y: 10 }],
+          },
           toolContext("session-a"),
         ),
       ).rejects.toThrow("ControlRequired");
 
       await acquire(harness);
       await expect(
-        harness.runtime.tools.desktop_click.execute(
-          { observationId: "f2a7c4ca-5197-4eaa-a2c8-4850f5123560", x: 10, y: 10 },
+        harness.runtime.tools.desktop_act.execute(
+          {
+            observationId: "f2a7c4ca-5197-4eaa-a2c8-4850f5123560",
+            actions: [{ type: "click", x: 10, y: 10 }],
+          },
           toolContext("session-a"),
         ),
       ).rejects.toThrow("FreshObservationRequired");
 
       const observed = await observe(harness);
       await expect(
-        harness.runtime.tools.desktop_click.execute(
-          { observationId: observed.details.observationId, x: 1280, y: 10 },
+        harness.runtime.tools.desktop_act.execute(
+          {
+            observationId: observed.details.observationId,
+            actions: [{ type: "click", x: 1280, y: 10 }],
+          },
           toolContext("session-a"),
         ),
       ).rejects.toThrow("exceed screen 1280×720");
 
-      const result = await harness.runtime.tools.desktop_click.execute(
-        { observationId: observed.details.observationId, x: 10, y: 20 },
+      const result = await harness.runtime.tools.desktop_act.execute(
+        {
+          observationId: observed.details.observationId,
+          actions: [{ type: "click", x: 10, y: 20 }],
+        },
         toolContext("session-a"),
       );
       expect(result.details.outcome).toBe("Applied");
       expect(result.details.applied).toBe(true);
       expect(harness.requests.at(-1)).toEqual({
-        path: "/api/agent/click",
-        body: JSON.stringify({ x: 10, y: 20, button: "left", clicks: 1 }),
+        path: "/api/agent/actions",
+        body: JSON.stringify({
+          actions: [{ type: "click", x: 10, y: 20, button: "left", clicks: 1 }],
+        }),
       });
     } finally {
       await harness.restore();
     }
   });
 
+  test("one observed frame unlocks one ordered action batch", async () => {
+    const harness = await createPluginHarness();
+    try {
+      await acquire(harness);
+      const observed = await observe(harness);
+      const actions = [
+        { type: "click", x: 10, y: 20, button: "left", clicks: 1 },
+        { type: "type", text: "hello" },
+        { type: "key", key: "Enter" },
+      ];
+
+      const result = await harness.runtime.tools.desktop_act.execute(
+        { observationId: observed.details.observationId, actions },
+        toolContext("session-a"),
+      );
+
+      expect(result.details.outcome).toBe("Applied");
+      expect(result.details.completedActions).toBe(3);
+      expect(harness.requests.slice(-2)).toEqual([
+        { path: "/api/me", body: "" },
+        { path: "/api/agent/actions", body: JSON.stringify({ actions }) },
+      ]);
+    } finally {
+      await harness.restore();
+    }
+  });
+
   test("an ambiguous dispatch returns UnknownOutcome and keeps the lease observable", async () => {
-    const harness = await createPluginHarness({ typeFailures: 1 });
+    const harness = await createPluginHarness({ batchFailures: 1 });
     try {
       await acquire(harness, "writer");
       const observed = await observe(harness, "writer");
-      const result = await harness.runtime.tools.desktop_type.execute(
-        { observationId: observed.details.observationId, text: "hello" },
+      const result = await harness.runtime.tools.desktop_act.execute(
+        {
+          observationId: observed.details.observationId,
+          actions: [{ type: "type", text: "hello" }],
+        },
         toolContext("writer"),
       );
       expect(result.details.outcome).toBe("UnknownOutcome");
       expect(result.details.retrySafe).toBe(false);
       expect(harness.agentActive).toBe(true);
 
+
       const refreshed = await observe(harness, "writer");
-      const retried = await harness.runtime.tools.desktop_type.execute(
-        { observationId: refreshed.details.observationId, text: "hello" },
+      const retried = await harness.runtime.tools.desktop_act.execute(
+        {
+          observationId: refreshed.details.observationId,
+          actions: [{ type: "type", text: "hello" }],
+        },
         toolContext("writer"),
       );
       expect(retried.details.outcome).toBe("Applied");
+    } finally {
+      await harness.restore();
+    }
+  });
+  test("a partial guest batch is not retryable and consumes the observation", async () => {
+    const harness = await createPluginHarness({ partialBatch: true });
+    try {
+      await acquire(harness);
+      const observed = await observe(harness);
+      const args = {
+        observationId: observed.details.observationId,
+        actions: [
+          { type: "type", text: "hello" },
+          { type: "key", key: "Enter" },
+        ],
+      };
+
+      const result = await harness.runtime.tools.desktop_act.execute(
+        args,
+        toolContext("session-a"),
+      );
+      expect(result.details.outcome).toBe("Partial");
+      expect(result.details.completedActions).toBe(1);
+      expect(result.details.retrySafe).toBe(false);
+      await expect(
+        harness.runtime.tools.desktop_act.execute(args, toolContext("session-a")),
+      ).rejects.toThrow("FreshObservationRequired");
     } finally {
       await harness.restore();
     }

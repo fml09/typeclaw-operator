@@ -166,10 +166,10 @@ KubeVirt VNC handler의 기본값은 새 connection이 기존 VNC session을 dro
 
 TypeClaw extension은 lifecycle과 raw VNC address를 model에 노출하지 않고 다음 두 conceptual capability를 제공합니다.
 
-- `computer_observe`: Gateway의 bounded screenshot을 vision profile이 읽을 수 있는 artifact와 `frameId`, dimensions, ownership state로 반환합니다.
-- `computer_act`: `expectedFrameId`, `epoch`, `actionId`와 click, move, type, key, scroll action을 보냅니다.
+- `computer_observe`: Gateway의 bounded image result와 `frameId`, dimensions, ownership state를 image-capable main model에 반환합니다.
+- `computer_act`: `expectedFrameId`, `epoch`, `actionId`와 같은 frame에서 결정할 수 있는 bounded ordered click, move, type, key, scroll `actions[]`를 보냅니다.
 
-구현된 PoC plugin은 모델 사용성을 위해 이 둘을 `desktop_status`, `desktop_acquire`, `desktop_observe`, `desktop_click`, `desktop_type`, `desktop_key`, `desktop_scroll`, `desktop_power`, `desktop_release`로 나눴습니다. Text-only main model을 지원하기 위해 `acquire → observe → first-party look_at(models.vision) → observationId를 echo한 input`을 서로 다른 model/tool round로 실행해 blind parallel dispatch를 막습니다. 아직 durable `frameId`/`actionId` ledger는 없으며 각 input 결과를 `Unconfirmed` 또는 연결 유실 시 `UnknownOutcome`로 취급합니다.
+구현된 PoC plugin은 이 capability를 `desktop_observe`와 `desktop_act`로 노출하고 lifecycle/status용 `desktop_status`, `desktop_acquire`, `desktop_launch`, `desktop_windows`, `desktop_power`, `desktop_release`를 분리합니다. `desktop_observe`는 bounded image result를 image-capable main model에 직접 반환하므로 별도 `look_at(models.vision)` tool/model round가 없습니다. `acquire → observe(image) → 다음 inference의 observationId를 echo한 desktop_act(actions[])` 순서이며, 같은 frame에서 결정할 수 있는 ordered action은 최대 16개를 한 번에 실행해 action마다 screenshot/model round를 반복하지 않습니다. 아직 durable `frameId`/`actionId` ledger는 없으며 guest 실행 중 실패는 `Partial`, 연결 유실은 `UnknownOutcome`로 취급하고 어느 batch도 자동 replay하지 않습니다.
 
 Plugin은 `sessionId`를 ephemeral input lease의 owner와 cancellation correlation에 쓰지만 durable desktop owner identity로 쓰지 않습니다. Controller session이 끝나면 RFB authority만 release하고 VM/PVC는 유지합니다. 현재 PoC의 power transition은 웹 또는 `desktop_power` tool로 명시적으로 요청해야 하며 lazy start와 idle power policy는 구현하지 않았습니다. 두 기능은 controller 단계의 recommendation입니다.
 

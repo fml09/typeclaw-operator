@@ -986,7 +986,7 @@ func (g *gateway) handleControlRelease(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"desktopName": id.desktopName, "released": true})
 }
 
-var agentInputActions = map[string]bool{"click": true, "type": true, "key": true, "scroll": true, "launch": true}
+var agentInputActions = map[string]bool{"actions": true, "launch": true}
 
 func (g *gateway) handleAgentAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
@@ -1081,10 +1081,10 @@ func (g *gateway) sharedAgentClient() *http.Client {
 	return g.agentClient
 }
 
-// proxyAgent forwards one typed action to the desktop-agent service in the
-// guest. Agent HTTP failures keep the agent's status and body so the plugin
-// can tell a deterministic tool failure (agent 4xx/5xx body without an
-// outcome) from an ambiguous dispatch (gateway-authored outcome field).
+// proxyAgent forwards one typed action batch or command to the desktop-agent
+// service in the guest. Agent HTTP failures keep the agent's status and body
+// so the plugin can tell a deterministic tool failure (agent 4xx/5xx body
+// without an outcome) from an ambiguous dispatch (gateway-authored outcome).
 func (g *gateway) proxyAgent(ctx context.Context, id identity, method, path string, body []byte) (int, []byte) {
 	requestCtx, cancel := context.WithTimeout(ctx, g.effectiveAgentTimeout())
 	defer cancel()

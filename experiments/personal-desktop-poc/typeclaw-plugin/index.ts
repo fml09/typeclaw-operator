@@ -1,6 +1,4 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { Buffer } from "node:buffer";
 
 import { definePlugin } from "typeclaw/plugin";
 import { z } from "zod";
@@ -25,19 +23,65 @@ const CONTROL_PERMISSION = "security.bypass.personalDesktopControl";
 const GATEWAY_STATUS_TIMEOUT_MS = 8_000;
 const GATEWAY_SCREENSHOT_TIMEOUT_MS = 15_000;
 const GATEWAY_ACTION_TIMEOUT_MS = 12_000;
-const GATEWAY_TYPE_TIMEOUT_MS = 32_000;
+const GATEWAY_BATCH_TIMEOUT_MS = 32_000;
 const GATEWAY_POWER_TIMEOUT_MS = 20_000;
 const SERIALIZED_OPERATION_TIMEOUT_MS = 45_000;
-const OBSERVATION_DIR = join(tmpdir(), "typeclaw-personal-desktop-observations");
+const MAX_ACTIONS_PER_BATCH = 16;
+const MAX_IMAGE_RESULT_BASE64_BYTES = 262_144;
+const MAX_BATCH_TEXT_CHARS = 4000;
+
+const desktopActionSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("click"),
+    x: z.number().int().nonnegative(),
+    y: z.number().int().nonnegative(),
+    button: z.enum(["left", "right", "middle"]).default("left"),
+    clicks: z.union([z.literal(1), z.literal(2)]).default(1),
+  }),
+  z.object({
+    type: z.literal("type"),
+    text: z.string().min(1).max(MAX_BATCH_TEXT_CHARS),
+  }),
+  z.object({
+    type: z.literal("key"),
+    key: z
+      .string()
+      .min(1)
+      .max(80)
+      .regex(/^[A-Za-z0-9+_-]+$/),
+  }),
+  z.object({
+    type: z.literal("scroll"),
+    x: z.number().int().nonnegative(),
+    y: z.number().int().nonnegative(),
+    deltaY: z.number().int().min(-4000).max(4000),
+    deltaX: z.number().int().min(-4000).max(4000).default(0),
+  }),
+]);
+
+const desktopActionBatchSchema = z
+  .array(desktopActionSchema)
+  .min(1)
+  .max(MAX_ACTIONS_PER_BATCH)
+  .superRefine((actions, validation) => {
+    const textCharacters = actions.reduce(
+      (total, action) => total + (action.type === "type" ? [...action.text].length : 0),
+      0,
+    );
+    if (textCharacters > MAX_BATCH_TEXT_CHARS) {
+      validation.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `action batch may type at most ${MAX_BATCH_TEXT_CHARS} characters`,
+      });
+    }
+  });
+type DesktopAction = z.infer<typeof desktopActionSchema>;
 
 const DESKTOP_TOOL_NAMES: Record<string, true> = {
   desktop_status: true,
   desktop_acquire: true,
   desktop_observe: true,
-  desktop_click: true,
-  desktop_type: true,
-  desktop_key: true,
-  desktop_scroll: true,
+  desktop_act: true,
   desktop_launch: true,
   desktop_windows: true,
   desktop_power: true,
@@ -76,13 +120,6 @@ type ObservedFrame = Pick<
 type ObservationState = {
   frame?: ObservedFrame;
   observationId?: string;
-  imagePath?: string;
-  mustObserve: boolean;
-};
-type PendingVisionCall = {
-  sessionId: string;
-  observationId: string;
-  imagePath: string;
 };
 type LocalControlLease = {
   sessionId: string;
@@ -151,10 +188,7 @@ export function observationIsFresh(
   current: GatewayStatus,
   presentedObservationId: string,
 ): boolean {
-  return (
-    !observation.mustObserve &&
-    observationMatchesCurrent(observation, current, presentedObservationId)
-  );
+  return observationMatchesCurrent(observation, current, presentedObservationId);
 }
 
 export default definePlugin({
@@ -168,35 +202,22 @@ export default definePlugin({
     let localControl: LocalControlLease | undefined;
     let disposing = false;
     const observations = new Map<string, ObservationState>();
-    const pendingVisionCalls = new Map<string, PendingVisionCall>();
 
     const observationFor = (sessionId: string): ObservationState => {
       let observation = observations.get(sessionId);
       if (!observation) {
-        observation = { mustObserve: true };
+        observation = {};
         observations.set(sessionId, observation);
       }
       return observation;
     };
 
-    const deleteObservationImage = (imagePath: string | undefined) => {
-      if (!imagePath) return;
-      void rm(imagePath, { force: true }).catch((error) => {
-        ctx.logger.warn(`failed to remove Personal Desktop observation ${imagePath}: ${String(error)}`);
-      });
-    };
-
     const invalidateObservation = (observation: ObservationState) => {
-      const imagePath = observation.imagePath;
       observation.frame = undefined;
       observation.observationId = undefined;
-      observation.imagePath = undefined;
-      observation.mustObserve = true;
-      deleteObservationImage(imagePath);
     };
 
     const invalidateAllObservations = () => {
-      pendingVisionCalls.clear();
       for (const observation of observations.values()) invalidateObservation(observation);
     };
 
@@ -372,7 +393,7 @@ export default definePlugin({
       }
       if (!current.controlActive || current.controlActor !== "agent") {
         throw new Error(
-          "ControlRequired: call desktop_acquire, then desktop_observe and look_at, before sending input.",
+          "ControlRequired: call desktop_acquire, then desktop_observe, before sending input.",
         );
       }
       return current;
@@ -473,18 +494,10 @@ export default definePlugin({
       current: GatewayStatus,
       presentedObservationId: string,
     ): ObservedFrame => {
-      if (
-        observation.mustObserve &&
-        observationMatchesCurrent(observation, current, presentedObservationId)
-      ) {
-        throw new Error(
-          `VisionObservationRequired: call look_at with exactly ${observation.imagePath ?? "the imagePath returned by desktop_observe"} before sending input.`,
-        );
-      }
       if (!observationIsFresh(observation, current, presentedObservationId)) {
         invalidateAllObservations();
         throw new Error(
-          "FreshObservationRequired: control ownership or the VM changed. Call desktop_observe, then use look_at on its imagePath, before sending input.",
+          "FreshObservationRequired: control ownership or the VM changed. Call desktop_observe before sending input.",
         );
       }
       return observation.frame!;
@@ -496,9 +509,6 @@ export default definePlugin({
           const observation = observations.get(event.sessionId);
           if (observation) invalidateObservation(observation);
           observations.delete(event.sessionId);
-          for (const [callId, pending] of pendingVisionCalls) {
-            if (pending.sessionId === event.sessionId) pendingVisionCalls.delete(callId);
-          }
           const lease = localControl;
           if (!lease || lease.sessionId !== event.sessionId) return;
 
@@ -534,40 +544,10 @@ export default definePlugin({
           }
         },
         "tool.before": (event) => {
-          if (event.tool === "look_at" && event.toolProvenance === "first-party") {
-            const observation = observations.get(event.sessionId);
-            if (
-              observation?.observationId &&
-              observation.imagePath &&
-              lookAtReferencesPath(event.args, observation.imagePath)
-            ) {
-              pendingVisionCalls.set(event.callId, {
-                sessionId: event.sessionId,
-                observationId: observation.observationId,
-                imagePath: observation.imagePath,
-              });
-            }
-            return;
-          }
           if (event.toolProvenance !== "plugin" || !(event.tool in DESKTOP_TOOL_NAMES)) return;
           if (disposing) return { block: true, reason: "Personal Desktop plugin is disposing" };
           if (ctx.permissions.has(event.origin, CONTROL_PERMISSION)) return;
           return { block: true, reason: `missing ${CONTROL_PERMISSION}` };
-        },
-        "tool.after": (event) => {
-          if (event.tool !== "look_at") return;
-          const pending = pendingVisionCalls.get(event.callId);
-          if (!pending) return;
-          pendingVisionCalls.delete(event.callId);
-          const observation = observations.get(pending.sessionId);
-          if (
-            !observation ||
-            observation.observationId !== pending.observationId ||
-            observation.imagePath !== pending.imagePath
-          ) {
-            return;
-          }
-          if (visionResultSucceeded(event.result)) observation.mustObserve = false;
         },
       },
       tools: {
@@ -595,7 +575,7 @@ export default definePlugin({
         },
         desktop_acquire: {
           description:
-            "Acquire exclusive agent input control if it is free. This does not observe the screen; call desktop_observe and then look_at in later tool rounds before input.",
+            "Acquire exclusive agent input control if it is free. This does not observe the screen; call desktop_observe before input.",
           parameters: z.object({}),
           async execute(_args, toolCtx) {
             const lease = reserveLocalControl(toolCtx.sessionId);
@@ -609,7 +589,7 @@ export default definePlugin({
                   content: [
                     {
                       type: "text",
-                      text: "Agent control acquired for this TypeClaw session. Call desktop_observe, then use look_at on its imagePath, before sending input.",
+                      text: "Agent control acquired for this TypeClaw session. Call desktop_observe before sending input.",
                     },
                   ],
                   details: granted,
@@ -623,15 +603,19 @@ export default definePlugin({
         },
         desktop_observe: {
           description:
-            "Capture the current desktop through the guest agent and save a bounded JPEG. This model may be text-only: after this tool returns, MUST call the first-party look_at tool with exactly the returned imagePath before any input. A successful look_at call unlocks one input action. Coordinates use the framebuffer dimensions returned here.",
+            "Capture the current desktop and return a bounded JPEG directly to the image-capable main model. This observation unlocks one ordered desktop_act batch. Coordinates use the framebuffer dimensions returned here.",
           parameters: z.object({}),
           async execute(_args, toolCtx) {
             return serialized(toolCtx.signal, async (operationSignal) => {
               const frame = await fetchFrame(config, operationSignal);
               const observationId = crypto.randomUUID();
-              const imagePath = await writeObservationImage(observationId, frame.bytes);
+              const imageData = Buffer.from(frame.bytes).toString("base64");
+              if (imageData.length > MAX_IMAGE_RESULT_BASE64_BYTES) {
+                throw new Error(
+                  `encoded screenshot exceeded ${MAX_IMAGE_RESULT_BASE64_BYTES} base64 bytes`,
+                );
+              }
               const observation = observationFor(toolCtx.sessionId);
-              const previousImagePath = observation.imagePath;
               observation.frame = {
                 framebufferWidth: frame.framebufferWidth,
                 framebufferHeight: frame.framebufferHeight,
@@ -640,18 +624,14 @@ export default definePlugin({
                 controlGeneration: frame.controlGeneration,
               };
               observation.observationId = observationId;
-              observation.imagePath = imagePath;
-              observation.mustObserve = true;
-              if (previousImagePath !== imagePath) deleteObservationImage(previousImagePath);
               const details = {
                 framebufferWidth: frame.framebufferWidth,
                 framebufferHeight: frame.framebufferHeight,
                 encodedWidth: frame.encodedWidth,
                 encodedHeight: frame.encodedHeight,
                 encodedBytes: frame.bytes.byteLength,
+                imageBase64Bytes: imageData.length,
                 observationId,
-                imagePath,
-                visionTool: "look_at",
                 gatewayBootID: frame.gatewayBootID,
                 vmiUID: frame.vmiUID,
                 controlGeneration: frame.controlGeneration,
@@ -663,10 +643,14 @@ export default definePlugin({
                     type: "text" as const,
                     text: [
                       `Observation ${observationId}; screen ${frame.framebufferWidth}×${frame.framebufferHeight}; encoded ${frame.encodedWidth}×${frame.encodedHeight}.`,
-                      `Screenshot: ${imagePath}.`,
-                      "Call look_at now with exactly this imagePath and ask it to describe visible controls, text, and their approximate coordinates in the full framebuffer coordinate space.",
-                      "After look_at succeeds, echo this observationId in exactly one input tool call.",
+                      "The attached image is the current desktop. Interpret coordinates in the full framebuffer coordinate space.",
+                      "Echo this observationId in exactly one desktop_act call.",
                     ].join(" "),
+                  },
+                  {
+                    type: "image" as const,
+                    mimeType: frame.mimeType,
+                    data: imageData,
                   },
                 ],
                 details,
@@ -674,174 +658,15 @@ export default definePlugin({
             });
           },
         },
-        desktop_click: {
+        desktop_act: {
           description:
-            "Click absolute screen coordinates using an existing agent control lease and the latest observationId. Never retry after an ambiguous dispatch failure.",
+            "Execute one bounded ordered action batch from the latest observed frame. Group deterministic click/type/key/scroll steps that do not require another visual decision; stop before any target whose position depends on a UI change. Never retry after an ambiguous or partial dispatch failure.",
           parameters: z.object({
             observationId: z.string().uuid(),
-            x: z.number().int().nonnegative(),
-            y: z.number().int().nonnegative(),
-            button: z.enum(["left", "right", "middle"]).default("left"),
-            clicks: z.union([z.literal(1), z.literal(2)]).default(1),
+            actions: desktopActionBatchSchema,
           }),
-          fileOperands: { nonFile: ["observationId", "button"] },
-          async execute(args, toolCtx) {
-            return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal) => {
-              const observation = observationFor(toolCtx.sessionId);
-              const current = await requireExistingControl(signal);
-              const observed = requireFreshObservation(observation, current, args.observationId);
-              if (args.x >= observed.framebufferWidth || args.y >= observed.framebufferHeight) {
-                throw new Error(
-                  `coordinates (${args.x}, ${args.y}) exceed screen ${observed.framebufferWidth}×${observed.framebufferHeight}`,
-                );
-              }
-              try {
-                const result = await gatewayJSON<Record<string, unknown>>(
-                  config,
-                  "/api/agent/click",
-                  {
-                    method: "POST",
-                    body: JSON.stringify({
-                      x: args.x,
-                      y: args.y,
-                      button: args.button ?? "left",
-                      clicks: args.clicks ?? 1,
-                    }),
-                  },
-                  signal,
-                  GATEWAY_ACTION_TIMEOUT_MS,
-                );
-                invalidateAllObservations();
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text: `Input applied at (${args.x}, ${args.y}). Observe before deciding whether it had the intended effect.`,
-                    },
-                  ],
-                  details: {
-                    dispatched: true,
-                    applied: result.applied === true,
-                    outcome: "Applied",
-                    retrySafe: false,
-                    x: args.x,
-                    y: args.y,
-                    button: args.button ?? "left",
-                    clicks: args.clicks ?? 1,
-                  },
-                };
-              } catch (error) {
-                invalidateAllObservations();
-                return handleActionFailure("click", error);
-              }
-            });
-          },
-        },
-        desktop_type: {
-          description:
-            "Type text with real key events into the currently focused guest application. Input effects remain to be confirmed by the next observe.",
-          parameters: z.object({
-            observationId: z.string().uuid(),
-            text: z.string().min(1).max(4000),
-          }),
-          fileOperands: { nonFile: ["observationId", "text"] },
-          async execute({ observationId, text }, toolCtx) {
-            return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal) => {
-              const observation = observationFor(toolCtx.sessionId);
-              requireFreshObservation(
-                observation,
-                await requireExistingControl(signal),
-                observationId,
-              );
-              try {
-                const result = await gatewayJSON<Record<string, unknown>>(
-                  config,
-                  "/api/agent/type",
-                  { method: "POST", body: JSON.stringify({ text }) },
-                  signal,
-                  GATEWAY_TYPE_TIMEOUT_MS,
-                );
-                invalidateAllObservations();
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text: `Typed ${[...text].length} character(s). Observe before continuing.`,
-                    },
-                  ],
-                  details: {
-                    dispatched: true,
-                    applied: result.applied === true,
-                    outcome: "Applied",
-                    retrySafe: false,
-                  },
-                };
-              } catch (error) {
-                invalidateAllObservations();
-                return handleActionFailure("type", error);
-              }
-            });
-          },
-        },
-        desktop_key: {
-          description:
-            "Press one guest key or key combination, such as Enter, Tab, Escape, Control+a, or Alt+F4.",
-          parameters: z.object({
-            observationId: z.string().uuid(),
-            key: z
-              .string()
-              .min(1)
-              .max(80)
-              .regex(/^[A-Za-z0-9+_-]+$/),
-          }),
-          fileOperands: { nonFile: ["observationId", "key"] },
-          async execute({ observationId, key }, toolCtx) {
-            return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal) => {
-              const observation = observationFor(toolCtx.sessionId);
-              requireFreshObservation(
-                observation,
-                await requireExistingControl(signal),
-                observationId,
-              );
-              try {
-                const result = await gatewayJSON<Record<string, unknown>>(
-                  config,
-                  "/api/agent/key",
-                  { method: "POST", body: JSON.stringify({ key }) },
-                  signal,
-                  GATEWAY_ACTION_TIMEOUT_MS,
-                );
-                invalidateAllObservations();
-                return {
-                  content: [
-                    { type: "text", text: `Key ${key} applied. Observe before continuing.` },
-                  ],
-                  details: {
-                    dispatched: true,
-                    applied: result.applied === true,
-                    outcome: "Applied",
-                    retrySafe: false,
-                  },
-                };
-              } catch (error) {
-                invalidateAllObservations();
-                return handleActionFailure("key", error);
-              }
-            });
-          },
-        },
-        desktop_scroll: {
-          description:
-            "Move to absolute screen coordinates and send a relative mouse-wheel event using the latest observationId.",
-          parameters: z.object({
-            observationId: z.string().uuid(),
-            x: z.number().int().nonnegative(),
-            y: z.number().int().nonnegative(),
-            deltaY: z.number().int().min(-4000).max(4000),
-            deltaX: z.number().int().min(-4000).max(4000).default(0),
-          }),
-          fileOperands: { nonFile: ["observationId"] },
-          async execute({ observationId, x, y, deltaY, deltaX }, toolCtx) {
+          fileOperands: { nonFile: ["observationId", "actions"] },
+          async execute({ observationId, actions }, toolCtx) {
             return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal) => {
               const observation = observationFor(toolCtx.sessionId);
               const observed = requireFreshObservation(
@@ -849,39 +674,78 @@ export default definePlugin({
                 await requireExistingControl(signal),
                 observationId,
               );
-              if (x >= observed.framebufferWidth || y >= observed.framebufferHeight) {
-                throw new Error(
-                  `coordinates (${x}, ${y}) exceed screen ${observed.framebufferWidth}×${observed.framebufferHeight}`,
-                );
-              }
+              const normalizedActions = actions.map((action: DesktopAction) => {
+                if (action.type === "click") {
+                  if (
+                    action.x >= observed.framebufferWidth ||
+                    action.y >= observed.framebufferHeight
+                  ) {
+                    throw new Error(
+                      `coordinates (${action.x}, ${action.y}) exceed screen ${observed.framebufferWidth}×${observed.framebufferHeight}`,
+                    );
+                  }
+                  return {
+                    ...action,
+                    button: action.button ?? "left",
+                    clicks: action.clicks ?? 1,
+                  };
+                }
+                if (action.type === "scroll") {
+                  if (
+                    action.x >= observed.framebufferWidth ||
+                    action.y >= observed.framebufferHeight
+                  ) {
+                    throw new Error(
+                      `coordinates (${action.x}, ${action.y}) exceed screen ${observed.framebufferWidth}×${observed.framebufferHeight}`,
+                    );
+                  }
+                  return { ...action, deltaX: action.deltaX ?? 0 };
+                }
+                return action;
+              });
+
               try {
                 const result = await gatewayJSON<Record<string, unknown>>(
                   config,
-                  "/api/agent/scroll",
-                  { method: "POST", body: JSON.stringify({ x, y, deltaX, deltaY }) },
+                  "/api/agent/actions",
+                  {
+                    method: "POST",
+                    body: JSON.stringify({ actions: normalizedActions }),
+                  },
                   signal,
-                  GATEWAY_ACTION_TIMEOUT_MS,
+                  GATEWAY_BATCH_TIMEOUT_MS,
                 );
                 invalidateAllObservations();
+                const applied = result.applied === true;
+                const outcome = applied
+                  ? "Applied"
+                  : result.outcome === "Partial"
+                    ? "Partial"
+                    : "NotApplied";
+                const completedActions =
+                  typeof result.completedActions === "number" ? result.completedActions : 0;
                 return {
                   content: [
                     {
                       type: "text",
-                      text: `Wheel input applied at (${x}, ${y}). Observe before continuing.`,
+                      text: applied
+                        ? `${completedActions} ordered desktop action(s) applied. Observe before continuing.`
+                        : `Desktop action batch ended with ${outcome} after ${completedActions} completed action(s). Do not retry automatically; observe first.`,
                     },
                   ],
                   details: {
+                    ...result,
                     dispatched: true,
-                    applied: result.applied === true,
-                    outcome: "Applied",
+                    applied,
+                    outcome,
                     retrySafe: false,
-                    x,
-                    y,
+                    actionCount: normalizedActions.length,
+                    completedActions,
                   },
                 };
               } catch (error) {
                 invalidateAllObservations();
-                return handleActionFailure("scroll", error);
+                return handleActionFailure("action batch", error);
               }
             });
           },
@@ -1121,7 +985,6 @@ export default definePlugin({
       },
       onDispose: async () => {
         disposing = true;
-        pendingVisionCalls.clear();
         const lease = localControl;
         if (lease) {
           lease.closing = true;
@@ -1135,9 +998,6 @@ export default definePlugin({
           ctx.logger.warn(`timed out draining Personal Desktop tool queue: ${String(error)}`);
         }
         observations.clear();
-        await rm(OBSERVATION_DIR, { recursive: true, force: true }).catch((error) => {
-          ctx.logger.warn(`failed to remove Personal Desktop observation directory: ${String(error)}`);
-        });
         const cleanupSignal = AbortSignal.timeout(6_000);
         try {
           await releaseAgentRequest(config, cleanupSignal);
@@ -1263,50 +1123,6 @@ async function releaseAgentRequest(config: PluginConfig, signal?: AbortSignal): 
   );
 }
 
-function lookAtReferencesPath(args: Record<string, unknown>, imagePath: string): boolean {
-  const images = args.images;
-  if (!Array.isArray(images) || images.length !== 1) return false;
-  const image = images[0];
-  return Boolean(
-    image &&
-      typeof image === "object" &&
-      "path" in image &&
-      (image as { path?: unknown }).path === imagePath,
-  );
-}
-
-function visionResultSucceeded(result: {
-  content: Array<{ type: string; text?: string }>;
-  details?: unknown;
-}): boolean {
-  const details =
-    result.details && typeof result.details === "object"
-      ? (result.details as { text?: unknown; error?: unknown })
-      : undefined;
-  return Boolean(
-    details &&
-      details.error === undefined &&
-      typeof details.text === "string" &&
-      details.text.trim() &&
-      result.content.some(
-        (part) =>
-          part.type === "text" &&
-          typeof part.text === "string" &&
-          part.text.trim() &&
-          !part.text.startsWith("[tool-result-cap:"),
-      ),
-  );
-}
-
-async function writeObservationImage(
-  observationId: string,
-  bytes: Uint8Array,
-): Promise<string> {
-  await mkdir(OBSERVATION_DIR, { recursive: true, mode: 0o700 });
-  const imagePath = join(OBSERVATION_DIR, `${observationId}.jpg`);
-  await writeFile(imagePath, bytes, { flag: "wx", mode: 0o600 });
-  return imagePath;
-}
 
 async function fetchFrame(config: PluginConfig, signal?: AbortSignal): Promise<Frame> {
   const query = new URLSearchParams({

@@ -1301,15 +1301,15 @@ func TestAgentControlAcquireReleaseAndOwnership(t *testing.T) {
 func TestAgentActionRequiresAcquiredControl(t *testing.T) {
 	h := newAgentHarness(t, "http://desktop-agent.invalid")
 	response := httptest.NewRecorder()
-	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/click", bytes.NewBufferString(`{"x":1,"y":2}`)))
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/actions", bytes.NewBufferString(`{"actions":[{"type":"click","x":1,"y":2,"button":"left"}]}`)))
 	if response.Code != http.StatusConflict {
-		t.Fatalf("click without acquire status = %d, want 409", response.Code)
+		t.Fatalf("action batch without acquire status = %d, want 409", response.Code)
 	}
 
 	response = httptest.NewRecorder()
-	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/unknown", bytes.NewBufferString(`{}`)))
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/click", bytes.NewBufferString(`{}`)))
 	if response.Code != http.StatusNotFound {
-		t.Fatalf("unknown action status = %d, want 404", response.Code)
+		t.Fatalf("removed single-action endpoint status = %d, want 404", response.Code)
 	}
 }
 
@@ -1332,11 +1332,12 @@ func TestAgentActionForwardsToGuestAgentWithDerivedBearer(t *testing.T) {
 		t.Fatalf("acquire status = %d", response.Code)
 	}
 	response = httptest.NewRecorder()
-	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/click", bytes.NewBufferString(`{"x":10,"y":20,"button":"left","clicks":1}`)))
+	const payload = `{"actions":[{"type":"click","x":10,"y":20,"button":"left","clicks":1},{"type":"type","text":"hello"}]}`
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/actions", bytes.NewBufferString(payload)))
 	if response.Code != http.StatusOK {
-		t.Fatalf("click status = %d, body %s", response.Code, response.Body.String())
+		t.Fatalf("action batch status = %d, body %s", response.Code, response.Body.String())
 	}
-	if gotPath != "/click" || gotBody != `{"x":10,"y":20,"button":"left","clicks":1}` {
+	if gotPath != "/actions" || gotBody != payload {
 		t.Fatalf("agent saw path %q body %q", gotPath, gotBody)
 	}
 	wantBearer := "Bearer " + desktopAgentToken(h.config.ownerHashKey, h.issuer, h.subject, h.config.typeClawInstanceUID)
@@ -1353,9 +1354,9 @@ func TestAgentActionReportsUnknownOutcomeWhenGuestIsUnreachable(t *testing.T) {
 		t.Fatalf("acquire status = %d", response.Code)
 	}
 	response = httptest.NewRecorder()
-	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/click", bytes.NewBufferString(`{"x":1,"y":2}`)))
+	h.handler.ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/actions", bytes.NewBufferString(`{"actions":[{"type":"click","x":1,"y":2,"button":"left"}]}`)))
 	if response.Code != http.StatusBadGateway {
-		t.Fatalf("click status = %d, want 502", response.Code)
+		t.Fatalf("action batch status = %d, want 502", response.Code)
 	}
 	var body struct {
 		Outcome string `json:"outcome"`
@@ -1364,7 +1365,7 @@ func TestAgentActionReportsUnknownOutcomeWhenGuestIsUnreachable(t *testing.T) {
 		t.Fatal(err)
 	}
 	if body.Outcome != "UnknownOutcome" {
-		t.Fatalf("click body outcome = %q, want UnknownOutcome", body.Outcome)
+		t.Fatalf("action batch body outcome = %q, want UnknownOutcome", body.Outcome)
 	}
 }
 
@@ -1495,9 +1496,9 @@ func TestAgentActionPrefersConfiguredTokenOverDerivedBearer(t *testing.T) {
 		t.Fatalf("acquire status = %d", response.Code)
 	}
 	response = httptest.NewRecorder()
-	g.handler().ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/click", bytes.NewBufferString(`{"x":1,"y":2}`)))
+	g.handler().ServeHTTP(response, h.agentRequest(t, http.MethodPost, "/api/agent/actions", bytes.NewBufferString(`{"actions":[{"type":"click","x":1,"y":2,"button":"left"}]}`)))
 	if response.Code != http.StatusOK {
-		t.Fatalf("click status = %d, body %s", response.Code, response.Body.String())
+		t.Fatalf("action batch status = %d, body %s", response.Code, response.Body.String())
 	}
 	if gotAuthorization != "Bearer "+h.config.agentToken {
 		t.Fatalf("agent saw Authorization %q, want the configured desktop-agent token", gotAuthorization)
