@@ -1,25 +1,31 @@
+// Personal Desktop computer-use Platform Extension.
+//
+// The operator embeds this file in its own image and projects it read-only into
+// the Managed Runtime, so it never lands in the Agent Folder. It requires a
+// TypeClaw fork build that understands both TYPECLAW_PLATFORM_EXTENSIONS and
+// plugin-contributed channel commands; the published `typeclaw` types this file
+// compiles against predate `channelCommands`, which is why the exports object is
+// typed locally at the bottom of the factory.
 import { Buffer } from "node:buffer";
 
 import { definePlugin } from "typeclaw/plugin";
+import type { PermissionService, PluginExports, PluginLogger } from "typeclaw/plugin";
 import { z } from "zod";
 
-const configSchema = z.object({
-  gatewayUrl: z.string().url().describe("HTTPS URL of the Personal Desktop Gateway"),
-  issuer: z.string().min(1).max(512).describe("Exact OIDC issuer linked to this TypeClaw runtime"),
-  subject: z
-    .string()
-    .min(1)
-    .max(512)
-    .describe("Stable OIDC subject linked to this TypeClaw runtime"),
-  agentTokenEnv: z
-    .string()
-    .regex(/^[A-Z][A-Z0-9_]*$/)
-    .default("PERSONAL_DESKTOP_AGENT_TOKEN"),
-  screenshotMaxWidth: z.number().int().min(320).max(1600).default(1024),
-  screenshotMaxBytes: z.number().int().min(50_000).max(190_000).default(180_000),
-});
-
 const CONTROL_PERMISSION = "security.bypass.personalDesktopControl";
+const GATEWAY_URL_ENV = "PERSONAL_DESKTOP_GATEWAY_URL";
+const CONSOLE_URL_ENV = "PERSONAL_DESKTOP_CONSOLE_URL";
+const SCREENSHOT_MAX_WIDTH_ENV = "PERSONAL_DESKTOP_SCREENSHOT_MAX_WIDTH";
+const SCREENSHOT_MAX_BYTES_ENV = "PERSONAL_DESKTOP_SCREENSHOT_MAX_BYTES";
+const DEFAULT_AGENT_TOKEN_ENV = "PERSONAL_DESKTOP_AGENT_TOKEN";
+
+const SCREENSHOT_MAX_WIDTH_MIN = 320;
+const SCREENSHOT_MAX_WIDTH_MAX = 1600;
+const SCREENSHOT_MAX_WIDTH_DEFAULT = 1024;
+const SCREENSHOT_MAX_BYTES_MIN = 50_000;
+const SCREENSHOT_MAX_BYTES_MAX = 190_000;
+const SCREENSHOT_MAX_BYTES_DEFAULT = 180_000;
+
 const GATEWAY_STATUS_TIMEOUT_MS = 8_000;
 const GATEWAY_SCREENSHOT_TIMEOUT_MS = 15_000;
 const GATEWAY_ACTION_TIMEOUT_MS = 12_000;
@@ -29,6 +35,33 @@ const SERIALIZED_OPERATION_TIMEOUT_MS = 45_000;
 const MAX_ACTIONS_PER_BATCH = 16;
 const MAX_IMAGE_RESULT_BASE64_BYTES = 262_144;
 const MAX_BATCH_TEXT_CHARS = 4000;
+
+// Every field is optional: the operator injects the whole configuration through
+// the environment when it renders the Managed Runtime, and an Instance that
+// carries no typeclaw.json block for this extension must still load.
+const configSchema = z
+  .object({
+    gatewayUrl: z.string().url().describe("Origin of the Desktop Gateway agent listener"),
+    agentTokenEnv: z
+      .string()
+      .regex(/^[A-Z][A-Z0-9_]*$/)
+      .describe("Environment variable holding the Gateway bearer token"),
+    screenshotMaxWidth: z
+      .number()
+      .int()
+      .min(SCREENSHOT_MAX_WIDTH_MIN)
+      .max(SCREENSHOT_MAX_WIDTH_MAX)
+      .describe("Longest edge of an observation before encoding"),
+    screenshotMaxBytes: z
+      .number()
+      .int()
+      .min(SCREENSHOT_MAX_BYTES_MIN)
+      .max(SCREENSHOT_MAX_BYTES_MAX)
+      .describe("Raw byte cap of one encoded observation"),
+    consoleUrl: z.string().url().describe("Public Desktop Console URL reported to operators"),
+  })
+  .partial()
+  .optional();
 
 const desktopActionSchema = z.discriminatedUnion("type", [
   z.object({
@@ -87,11 +120,25 @@ const DESKTOP_TOOL_NAMES: Record<string, true> = {
   desktop_power: true,
   desktop_release: true,
 };
+
 type PluginConfig = z.infer<typeof configSchema>;
+
+export type ResolvedConfig = {
+  gatewayUrl: string;
+  agentTokenEnv: string;
+  screenshotMaxWidth: number;
+  screenshotMaxBytes: number;
+  consoleUrl?: string;
+};
+export type ConfigResolution = { config: ResolvedConfig } | { unavailable: string };
+
 type GatewayStatus = {
   desktopName: string;
+  os?: string;
+  consoleURL?: string;
   gatewayBootID?: string;
   vmExists?: boolean;
+  vmPrintableStatus?: string;
   vmiExists?: boolean;
   vmiPhase?: string;
   vmiUID?: string;
@@ -131,6 +178,39 @@ type LocalControlLease = {
   controlGeneration?: number;
   orphaned: boolean;
   cleanupReason?: string;
+};
+
+type DesktopToolResult = {
+  content: Array<{ type: "text"; text: string } | { type: "image"; mimeType: string; data: string }>;
+  details: Record<string, unknown>;
+};
+
+// Mirrors the fork's `PluginChannelCommand` surface. Declared locally because
+// the published `typeclaw` package this extension compiles against does not
+// carry these types yet.
+type PluginChannelCommandPermission = "none" | "session.control" | "session.admin";
+type SessionOrigin = NonNullable<Parameters<PermissionService["has"]>[0]>;
+type PluginChannelCommandContext = {
+  readonly args: string;
+  readonly sessionId: string | null;
+  readonly invokerId: string | null;
+  readonly origin: SessionOrigin;
+  readonly adapter: string;
+  readonly permissions: PermissionService;
+  readonly logger: PluginLogger;
+  readonly signal: AbortSignal;
+};
+type PluginChannelCommand = {
+  readonly description: string;
+  readonly aliases?: readonly string[];
+  readonly permission?: PluginChannelCommandPermission;
+  readonly run: (ctx: PluginChannelCommandContext) => Promise<string | void> | string | void;
+};
+// Widening `PluginExports` instead of casting keeps the rest of the exports
+// object type-checked; returning a typed variable rather than an object literal
+// avoids the excess-property error the narrower upstream type would raise.
+type PersonalDesktopExports = PluginExports & {
+  channelCommands?: Record<string, PluginChannelCommand>;
 };
 
 export function withDeadlineSignal(
@@ -191,11 +271,108 @@ export function observationIsFresh(
   return observationMatchesCurrent(observation, current, presentedObservationId);
 }
 
+class ConfigResolutionError extends Error {}
+
+// Resolved once at plugin start. An explicit typeclaw.json value always beats
+// the environment: the operator injects PERSONAL_DESKTOP_* into every Managed
+// Runtime, so an administrator who deliberately overrides one in the Agent
+// Folder must not have that override silently replaced by the platform default.
+export function resolvePluginConfig(
+  config: PluginConfig,
+  env: Record<string, string | undefined>,
+): ConfigResolution {
+  try {
+    const configuredGatewayUrl = trimmed(config?.gatewayUrl);
+    const gatewayUrlSource = configuredGatewayUrl ? "gatewayUrl in typeclaw.json" : GATEWAY_URL_ENV;
+    const gatewayUrlValue = configuredGatewayUrl ?? trimmed(env[GATEWAY_URL_ENV]);
+    if (!gatewayUrlValue) return { unavailable: `${GATEWAY_URL_ENV} is not set` };
+    return {
+      config: {
+        gatewayUrl: normalizeGatewayUrl(gatewayUrlValue, gatewayUrlSource),
+        agentTokenEnv: config?.agentTokenEnv ?? DEFAULT_AGENT_TOKEN_ENV,
+        screenshotMaxWidth: boundedInteger(
+          config?.screenshotMaxWidth,
+          env[SCREENSHOT_MAX_WIDTH_ENV],
+          SCREENSHOT_MAX_WIDTH_ENV,
+          SCREENSHOT_MAX_WIDTH_MIN,
+          SCREENSHOT_MAX_WIDTH_MAX,
+          SCREENSHOT_MAX_WIDTH_DEFAULT,
+        ),
+        screenshotMaxBytes: boundedInteger(
+          config?.screenshotMaxBytes,
+          env[SCREENSHOT_MAX_BYTES_ENV],
+          SCREENSHOT_MAX_BYTES_ENV,
+          SCREENSHOT_MAX_BYTES_MIN,
+          SCREENSHOT_MAX_BYTES_MAX,
+          SCREENSHOT_MAX_BYTES_DEFAULT,
+        ),
+        consoleUrl: trimmed(config?.consoleUrl) ?? trimmed(env[CONSOLE_URL_ENV]),
+      },
+    };
+  } catch (error) {
+    // A malformed value is reported the same way a missing one is: the whole
+    // Managed Runtime must not fail to boot because one projected environment
+    // variable is wrong, and the operator sees the reason on every tool call.
+    if (error instanceof ConfigResolutionError) return { unavailable: error.message };
+    throw error;
+  }
+}
+
+function trimmed(value: string | undefined): string | undefined {
+  const candidate = value?.trim();
+  return candidate ? candidate : undefined;
+}
+
+function normalizeGatewayUrl(value: string, source: string): string {
+  let gateway: URL;
+  try {
+    gateway = new URL(value);
+  } catch {
+    throw new ConfigResolutionError(`${source} is not a valid URL`);
+  }
+  if (!["https:", "http:"].includes(gateway.protocol))
+    throw new ConfigResolutionError(`${source} must use HTTP or HTTPS`);
+  if (gateway.pathname !== "/" || gateway.search || gateway.hash)
+    throw new ConfigResolutionError(
+      `${source} must be an origin without a path, query, or fragment`,
+    );
+  return gateway.toString().replace(/\/$/, "");
+}
+
+function boundedInteger(
+  configured: number | undefined,
+  raw: string | undefined,
+  envName: string,
+  min: number,
+  max: number,
+  fallback: number,
+): number {
+  if (configured !== undefined) return configured;
+  const value = trimmed(raw);
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max)
+    throw new ConfigResolutionError(`${envName} must be an integer between ${min} and ${max}`);
+  return parsed;
+}
+
 export default definePlugin({
   permissions: [CONTROL_PERMISSION],
   configSchema,
   async plugin(ctx) {
-    const config = normalizeConfig(ctx.config);
+    const resolution = resolvePluginConfig(ctx.config, process.env);
+    const resolvedConfig = "config" in resolution ? resolution.config : undefined;
+    const unavailableReason = "unavailable" in resolution ? resolution.unavailable : undefined;
+    if (unavailableReason) {
+      ctx.logger.warn(
+        `Personal Desktop computer-use extension loaded without a Desktop Gateway: ${unavailableReason}`,
+      );
+    }
+    const requireConfig = (): ResolvedConfig => {
+      if (!resolvedConfig) throw new Error(`PluginUnavailable: ${unavailableReason}`);
+      return resolvedConfig;
+    };
+
     const serializedExecutor = createSerializedExecutor();
     const serialized = serializedExecutor.run;
     let powerUncertain: Record<string, unknown> | undefined;
@@ -222,7 +399,7 @@ export default definePlugin({
     };
 
     const status = (signal?: AbortSignal) =>
-      gatewayJSON<GatewayStatus>(config, "/api/me", undefined, signal);
+      gatewayJSON<GatewayStatus>(requireConfig(), "/api/me", undefined, signal);
 
     const requirePowerCertain = () => {
       if (!powerUncertain) return;
@@ -266,7 +443,7 @@ export default definePlugin({
     };
 
     const requireLocalControl = (
-      sessionId: string,
+      sessionId: string | null,
       allowPowerUncertain = false,
     ): LocalControlLease => {
       if (disposing) throw new Error("PluginUnavailable: Personal Desktop plugin is disposing");
@@ -318,7 +495,7 @@ export default definePlugin({
     };
 
     const beginLocalControlClose = (
-      sessionId: string,
+      sessionId: string | null,
       allowPowerUncertain = false,
     ): LocalControlLease => {
       const lease = requireLocalControl(sessionId, allowPowerUncertain);
@@ -403,6 +580,7 @@ export default definePlugin({
       lease: LocalControlLease,
       signal?: AbortSignal,
     ): Promise<Record<string, unknown>> => {
+      const config = requireConfig();
       requirePowerCertain();
       const current = await status(signal);
       requireGatewayControlAvailable(current);
@@ -503,7 +681,289 @@ export default definePlugin({
       return observation.frame!;
     };
 
-    return {
+    // Shared by the desktop_power tool and the `desktop` channel command so both
+    // traverse the same lease close, quarantine, and UnknownOutcome rules. The
+    // channel command may carry no live session, in which case a lease held by
+    // some other session fails this closed instead of being taken from it.
+    const powerOperation = async (
+      action: "start" | "stop",
+      sessionId: string | null,
+      signal?: AbortSignal,
+    ): Promise<DesktopToolResult> => {
+      const config = requireConfig();
+      if (disposing) throw new Error("PluginUnavailable: Personal Desktop plugin is disposing");
+      if (powerUncertain && action !== "start") {
+        throw new Error(
+          "PowerRecoveryRequired: only an explicit desktop_power start may clear an UnknownOutcome quarantine.",
+        );
+      }
+
+      const leaseAtInvocation = localControl;
+      let stopLease: LocalControlLease | undefined;
+      let startLease: LocalControlLease | undefined;
+      if (action === "stop" && leaseAtInvocation) {
+        stopLease = beginLocalControlClose(sessionId);
+      } else if (action === "start" && leaseAtInvocation) {
+        if (leaseAtInvocation.sessionId !== sessionId || leaseAtInvocation.closing) {
+          throw new Error(
+            "ControlBusy: another TypeClaw session owns or is releasing agent input control.",
+          );
+        }
+        startLease = leaseAtInvocation;
+      }
+
+      const operationSignal = stopLease
+        ? closingSignalForLease(stopLease, signal)
+        : startLease
+          ? signalForLease(startLease, signal)
+          : signal;
+      let controlReleaseConfirmed = false;
+      try {
+        return await serialized(operationSignal, async (boundedOperationSignal) => {
+          if (disposing) {
+            throw new Error("PluginUnavailable: Personal Desktop plugin is disposing");
+          }
+          if (stopLease) {
+            assertCurrentLease(stopLease, true);
+          } else if (startLease) {
+            assertCurrentLease(startLease, false);
+          } else if (localControl) {
+            throw new Error(
+              "ControlBusy: a TypeClaw session acquired input control before the power operation executed.",
+            );
+          }
+          if (powerUncertain && action !== "start") {
+            throw new Error(
+              "PowerRecoveryRequired: only an explicit desktop_power start may clear an UnknownOutcome quarantine.",
+            );
+          }
+          if (action === "stop") {
+            await releaseAgentRequest(config, boundedOperationSignal);
+            await waitForControlRelease(boundedOperationSignal);
+            controlReleaseConfirmed = true;
+          }
+          boundedOperationSignal.throwIfAborted();
+          agentHeaders(config); // Validate local credentials before POST dispatch.
+          try {
+            const result = await gatewayJSON<Record<string, unknown>>(
+              config,
+              `/api/power/${action}`,
+              { method: "POST" },
+              boundedOperationSignal,
+            );
+            invalidateAllObservations();
+            if (action === "start") powerUncertain = undefined;
+            return {
+              content: [{ type: "text" as const, text: JSON.stringify(result) }],
+              details: result,
+            };
+          } catch (error) {
+            invalidateAllObservations();
+            if (error instanceof GatewayHTTPError && error.body.outcome === "UnknownOutcome") {
+              const unknown = powerUnknownOutcome(action, error, error.body);
+              powerUncertain = {
+                ...unknown.details,
+                recordedAt: new Date().toISOString(),
+              };
+              return unknown;
+            }
+            if (!(error instanceof GatewayHTTPError) || isAmbiguousPowerHTTPStatus(error.status)) {
+              const unknown = powerUnknownOutcome(action, error, {
+                controlBlocked: "unknown",
+                transportError: error instanceof Error ? error.message : String(error),
+              });
+              powerUncertain = {
+                ...unknown.details,
+                recordedAt: new Date().toISOString(),
+              };
+              return unknown;
+            }
+            throw error;
+          }
+        });
+      } catch (error) {
+        if (stopLease && !controlReleaseConfirmed) {
+          renewLocalControlAfterFailedClose(stopLease);
+        }
+        throw error;
+      } finally {
+        if (stopLease && controlReleaseConfirmed) releaseLocalControl(stopLease);
+      }
+    };
+
+    const releaseOperation = async (
+      sessionId: string | null,
+      signal?: AbortSignal,
+    ): Promise<DesktopToolResult> => {
+      const config = requireConfig();
+      const orphanedLease = localControl?.orphaned ? localControl : undefined;
+      if (orphanedLease) {
+        const timeoutSignal = AbortSignal.timeout(8_000);
+        const cleanupSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+        return serialized(cleanupSignal, async (operationSignal) => {
+          if (localControl !== orphanedLease || !orphanedLease.orphaned) {
+            throw new Error(
+              "ControlLeaseChanged: the quarantined controller changed before cleanup",
+            );
+          }
+          await releaseAgentRequest(config, operationSignal);
+          invalidateAllObservations();
+          await waitForAgentRelease(operationSignal);
+          releaseLocalControl(orphanedLease);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "Orphaned Agent control cleanup confirmed by the Gateway. A later session may now acquire a fresh controller.",
+              },
+            ],
+            details: { releaseConfirmed: true, orphanedControlRecovered: true },
+          };
+        });
+      }
+      const lease = beginLocalControlClose(sessionId, true);
+      const leaseSignal = closingSignalForLease(lease, signal);
+      try {
+        return await serialized(leaseSignal, async (operationSignal) => {
+          assertCurrentLease(lease, true);
+          await releaseAgentRequest(config, operationSignal);
+          invalidateAllObservations();
+          await waitForAgentRelease(operationSignal);
+          releaseLocalControl(lease);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "Agent control release confirmed by the Gateway. In-flight input, if any, has UnknownOutcome.",
+              },
+            ],
+            details: { releaseConfirmed: true },
+          };
+        });
+      } catch (error) {
+        renewLocalControlAfterFailedClose(lease);
+        throw error;
+      }
+    };
+
+    const describeQuarantine = (current: GatewayStatus): string[] => {
+      const reasons: string[] = [];
+      if (powerUncertain) reasons.push("a power action has an unknown outcome");
+      if (current.controlBlocked) reasons.push("the Gateway has blocked control");
+      if (current.powerRecoveryRequired) reasons.push("the Gateway requires an explicit start");
+      if (localControl?.orphaned) {
+        reasons.push("an Agent controller was not confirmed released");
+      }
+      return reasons;
+    };
+
+    const channelStatusReply = async (signal: AbortSignal): Promise<string> => {
+      const config = requireConfig();
+      const current = await status(signal);
+      const consoleURL = current.consoleURL ?? config.consoleUrl;
+      const reasons = describeQuarantine(current);
+      return [
+        `Desktop: ${current.desktopName || "unknown"}${current.os ? ` (${current.os})` : ""}`,
+        consoleURL ? `Console: ${consoleURL}` : "Console not published",
+        `VM: ${describeVMState(current)}`,
+        `Controller: ${describeController(current)}`,
+        reasons.length === 0
+          ? "Recovery required: no"
+          : `Recovery required: yes (${reasons.join("; ")})`,
+      ].join("\n");
+    };
+
+    const channelPowerReply = async (
+      action: "start" | "stop",
+      commandCtx: PluginChannelCommandContext,
+    ): Promise<string> => {
+      let result: DesktopToolResult;
+      try {
+        result = await powerOperation(action, commandCtx.sessionId, commandCtx.signal);
+      } catch (error) {
+        return [`Desktop ${action} failed.`, errorLine(error)].join("\n");
+      }
+      if (result.details.outcome === "UnknownOutcome") {
+        return [
+          `Desktop ${action} has an unknown outcome.`,
+          "Do not retry it.",
+          'Run "desktop status", then "desktop start" to recover.',
+        ].join("\n");
+      }
+      const lines = [`Desktop ${action} requested.`];
+      if (result.details.idempotent === true) {
+        lines.push("The VM was already in the requested state.");
+      }
+      lines.push('Run "desktop status" to see the new VM state.');
+      return lines.join("\n");
+    };
+
+    const channelReleaseReply = async (
+      commandCtx: PluginChannelCommandContext,
+    ): Promise<string> => {
+      let result: DesktopToolResult;
+      try {
+        result = await releaseOperation(commandCtx.sessionId, commandCtx.signal);
+      } catch (error) {
+        return ["Desktop release failed.", errorLine(error)].join("\n");
+      }
+      return [
+        result.details.orphanedControlRecovered === true
+          ? "Orphaned agent input control cleaned up."
+          : "Agent input control released.",
+        "A human can take control of the desktop now.",
+      ].join("\n");
+    };
+
+    // Replies are short plain English, one fact per line, and never echo the
+    // Gateway bearer token: this text is posted into a chat channel whose
+    // readers are not necessarily the desktop owner.
+    const desktopChannelCommand: PluginChannelCommand = {
+      description:
+        "Operate the Personal Desktop: status (default), start, stop, or release agent input control.",
+      aliases: ["vnc", "pc"],
+      // The session.admin tier gates who may operate this agent at all; the
+      // security.bypass.personalDesktopControl permission gates who may drive
+      // this particular desktop. Both must hold, because an administrator of the
+      // agent is not automatically an Input Controller of the owner's machine.
+      permission: "session.admin",
+      async run(commandCtx) {
+        if (!commandCtx.permissions.has(commandCtx.origin, CONTROL_PERMISSION)) {
+          return [
+            "Not permitted.",
+            `This channel identity is missing ${CONTROL_PERMISSION}.`,
+          ].join("\n");
+        }
+        if (!resolvedConfig) {
+          return ["Personal Desktop is unavailable.", `PluginUnavailable: ${unavailableReason}`].join(
+            "\n",
+          );
+        }
+        const words = commandCtx.args.trim().split(/\s+/).filter(Boolean);
+        const subcommand = words[0] ?? "status";
+        if (words.length > 1 || !isDesktopSubcommand(subcommand)) {
+          return [
+            `Unknown desktop subcommand: ${words.join(" ") || "(empty)"}`,
+            "Usage: desktop [status|start|stop|release]",
+          ].join("\n");
+        }
+        switch (subcommand) {
+          case "status":
+            try {
+              return await channelStatusReply(commandCtx.signal);
+            } catch (error) {
+              return ["Desktop status unavailable.", errorLine(error)].join("\n");
+            }
+          case "start":
+          case "stop":
+            return await channelPowerReply(subcommand, commandCtx);
+          case "release":
+            return await channelReleaseReply(commandCtx);
+        }
+      },
+    };
+
+    const exports: PersonalDesktopExports = {
       hooks: {
         "session.end": async (event) => {
           const observation = observations.get(event.sessionId);
@@ -523,7 +983,7 @@ export default definePlugin({
                 if (localControl !== lease) return;
                 const cleanupErrors: string[] = [];
                 try {
-                  await releaseAgentRequest(config, operationSignal);
+                  await releaseAgentRequest(requireConfig(), operationSignal);
                 } catch (error) {
                   cleanupErrors.push(`release: ${String(error)}`);
                 }
@@ -553,12 +1013,15 @@ export default definePlugin({
       tools: {
         desktop_status: {
           description:
-            "Inspect the authenticated user’s persistent desktop, VM power state, and current input owner.",
+            "Inspect the owner's persistent desktop, VM power state, Desktop Console URL, and current input owner.",
           parameters: z.object({}),
           async execute(_args, toolCtx) {
+            const config = requireConfig();
             const current = await status(toolCtx.signal);
             const details = {
               ...current,
+              os: current.os ?? null,
+              consoleURL: current.consoleURL ?? config.consoleUrl ?? null,
               pluginPowerUncertain: powerUncertain ?? null,
               pluginControlCleanupRequired: localControl?.orphaned
                 ? {
@@ -578,6 +1041,7 @@ export default definePlugin({
             "Acquire exclusive agent input control if it is free. This does not observe the screen; call desktop_observe before input.",
           parameters: z.object({}),
           async execute(_args, toolCtx) {
+            requireConfig();
             const lease = reserveLocalControl(toolCtx.sessionId);
             const controlSignal = signalForLease(lease, toolCtx.signal);
             try {
@@ -606,6 +1070,7 @@ export default definePlugin({
             "Capture the current desktop and return a bounded JPEG directly to the image-capable main model. This observation unlocks one ordered desktop_act batch. Coordinates use the framebuffer dimensions returned here.",
           parameters: z.object({}),
           async execute(_args, toolCtx) {
+            const config = requireConfig();
             return serialized(toolCtx.signal, async (operationSignal) => {
               const frame = await fetchFrame(config, operationSignal);
               const observationId = crypto.randomUUID();
@@ -667,6 +1132,7 @@ export default definePlugin({
           }),
           fileOperands: { nonFile: ["observationId", "actions"] },
           async execute({ observationId, actions }, toolCtx) {
+            const config = requireConfig();
             return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal) => {
               const observation = observationFor(toolCtx.sessionId);
               const observed = requireFreshObservation(
@@ -752,12 +1218,13 @@ export default definePlugin({
         },
         desktop_launch: {
           description:
-            "Launch an installed application on the desktop, such as firefox, terminal, or files. Requires an agent control lease but no observation; observe afterwards to see the result.",
+            "Launch an installed application on the desktop, such as browser, terminal, or files. Requires an agent control lease but no observation; observe afterwards to see the result.",
           parameters: z.object({
             app: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
           }),
           fileOperands: { nonFile: ["app"] },
           async execute({ app }, toolCtx) {
+            const config = requireConfig();
             return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal) => {
               await requireExistingControl(signal);
               try {
@@ -796,6 +1263,7 @@ export default definePlugin({
             "List the titles of top-level application windows currently on the desktop. View-only; it does not require or grant input control.",
           parameters: z.object({}),
           async execute(_args, toolCtx) {
+            const config = requireConfig();
             const result = await gatewayJSON<{ windows?: Array<Record<string, unknown>> }>(
               config,
               "/api/agent/windows",
@@ -816,113 +1284,7 @@ export default definePlugin({
           parameters: z.object({ action: z.enum(["start", "stop"]) }),
           fileOperands: { nonFile: ["action"] },
           async execute({ action }, toolCtx) {
-            if (disposing) throw new Error("PluginUnavailable: Personal Desktop plugin is disposing");
-            if (powerUncertain && action !== "start") {
-              throw new Error(
-                "PowerRecoveryRequired: only an explicit desktop_power start may clear an UnknownOutcome quarantine.",
-              );
-            }
-
-            const leaseAtInvocation = localControl;
-            let stopLease: LocalControlLease | undefined;
-            let startLease: LocalControlLease | undefined;
-            if (action === "stop" && leaseAtInvocation) {
-              stopLease = beginLocalControlClose(toolCtx.sessionId);
-            } else if (action === "start" && leaseAtInvocation) {
-              if (
-                leaseAtInvocation.sessionId !== toolCtx.sessionId ||
-                leaseAtInvocation.closing
-              ) {
-                throw new Error(
-                  "ControlBusy: another TypeClaw session owns or is releasing agent input control.",
-                );
-              }
-              startLease = leaseAtInvocation;
-            }
-
-            const operationSignal = stopLease
-              ? closingSignalForLease(stopLease, toolCtx.signal)
-              : startLease
-                ? signalForLease(startLease, toolCtx.signal)
-                : toolCtx.signal;
-            let controlReleaseConfirmed = false;
-            try {
-              return await serialized(operationSignal, async (boundedOperationSignal) => {
-                if (disposing) {
-                  throw new Error("PluginUnavailable: Personal Desktop plugin is disposing");
-                }
-                if (stopLease) {
-                  assertCurrentLease(stopLease, true);
-                } else if (startLease) {
-                  assertCurrentLease(startLease, false);
-                } else if (localControl) {
-                  throw new Error(
-                    "ControlBusy: a TypeClaw session acquired input control before the power operation executed.",
-                  );
-                }
-                if (powerUncertain && action !== "start") {
-                  throw new Error(
-                    "PowerRecoveryRequired: only an explicit desktop_power start may clear an UnknownOutcome quarantine.",
-                  );
-                }
-                if (action === "stop") {
-                  await releaseAgentRequest(config, boundedOperationSignal);
-                  await waitForControlRelease(boundedOperationSignal);
-                  controlReleaseConfirmed = true;
-                }
-                boundedOperationSignal.throwIfAborted();
-                agentHeaders(config); // Validate local credentials before POST dispatch.
-                try {
-                  const result = await gatewayJSON<Record<string, unknown>>(
-                    config,
-                    `/api/power/${action}`,
-                    { method: "POST" },
-                    boundedOperationSignal,
-                  );
-                  invalidateAllObservations();
-                  if (action === "start") powerUncertain = undefined;
-                  return {
-                    content: [{ type: "text", text: JSON.stringify(result) }],
-                    details: result,
-                  };
-                } catch (error) {
-                  invalidateAllObservations();
-                  if (
-                    error instanceof GatewayHTTPError &&
-                    error.body.outcome === "UnknownOutcome"
-                  ) {
-                    const unknown = powerUnknownOutcome(action, error, error.body);
-                    powerUncertain = {
-                      ...unknown.details,
-                      recordedAt: new Date().toISOString(),
-                    };
-                    return unknown;
-                  }
-                  if (
-                    !(error instanceof GatewayHTTPError) ||
-                    isAmbiguousPowerHTTPStatus(error.status)
-                  ) {
-                    const unknown = powerUnknownOutcome(action, error, {
-                      controlBlocked: "unknown",
-                      transportError: error instanceof Error ? error.message : String(error),
-                    });
-                    powerUncertain = {
-                      ...unknown.details,
-                      recordedAt: new Date().toISOString(),
-                    };
-                    return unknown;
-                  }
-                  throw error;
-                }
-              });
-            } catch (error) {
-              if (stopLease && !controlReleaseConfirmed) {
-                renewLocalControlAfterFailedClose(stopLease);
-              }
-              throw error;
-            } finally {
-              if (stopLease && controlReleaseConfirmed) releaseLocalControl(stopLease);
-            }
+            return powerOperation(action, toolCtx.sessionId, toolCtx.signal);
           },
         },
         desktop_release: {
@@ -930,59 +1292,11 @@ export default definePlugin({
             "Release agent input control so a human can take over. Any input whose acknowledgement was lost has UnknownOutcome and must not be replayed.",
           parameters: z.object({}),
           async execute(_args, toolCtx) {
-            const orphanedLease = localControl?.orphaned ? localControl : undefined;
-            if (orphanedLease) {
-              const timeoutSignal = AbortSignal.timeout(8_000);
-              const signal = toolCtx.signal
-                ? AbortSignal.any([toolCtx.signal, timeoutSignal])
-                : timeoutSignal;
-              return serialized(signal, async (operationSignal) => {
-                if (localControl !== orphanedLease || !orphanedLease.orphaned) {
-                  throw new Error(
-                    "ControlLeaseChanged: the quarantined controller changed before cleanup",
-                  );
-                }
-                await releaseAgentRequest(config, operationSignal);
-                invalidateAllObservations();
-                await waitForAgentRelease(operationSignal);
-                releaseLocalControl(orphanedLease);
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text: "Orphaned Agent control cleanup confirmed by the Gateway. A later session may now acquire a fresh controller.",
-                    },
-                  ],
-                  details: { releaseConfirmed: true, orphanedControlRecovered: true },
-                };
-              });
-            }
-            const lease = beginLocalControlClose(toolCtx.sessionId, true);
-            const signal = closingSignalForLease(lease, toolCtx.signal);
-            try {
-              return await serialized(signal, async (operationSignal) => {
-                assertCurrentLease(lease, true);
-                await releaseAgentRequest(config, operationSignal);
-                invalidateAllObservations();
-                await waitForAgentRelease(operationSignal);
-                releaseLocalControl(lease);
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text: "Agent control release confirmed by the Gateway. In-flight input, if any, has UnknownOutcome.",
-                    },
-                  ],
-                  details: { releaseConfirmed: true },
-                };
-              });
-            } catch (error) {
-              renewLocalControlAfterFailedClose(lease);
-              throw error;
-            }
+            return releaseOperation(toolCtx.sessionId, toolCtx.signal);
           },
         },
       },
+      channelCommands: { desktop: desktopChannelCommand },
       onDispose: async () => {
         disposing = true;
         const lease = localControl;
@@ -998,9 +1312,10 @@ export default definePlugin({
           ctx.logger.warn(`timed out draining Personal Desktop tool queue: ${String(error)}`);
         }
         observations.clear();
+        if (!resolvedConfig) return;
         const cleanupSignal = AbortSignal.timeout(6_000);
         try {
-          await releaseAgentRequest(config, cleanupSignal);
+          await releaseAgentRequest(resolvedConfig, cleanupSignal);
           await waitForAgentRelease(cleanupSignal);
         } catch (error) {
           ctx.logger.warn(`failed to release Personal Desktop agent control: ${String(error)}`);
@@ -1009,33 +1324,46 @@ export default definePlugin({
         }
       },
     };
+    return exports;
   },
 });
 
-function normalizeConfig(config: PluginConfig): PluginConfig {
-  const gateway = new URL(config.gatewayUrl);
-  if (!["https:", "http:"].includes(gateway.protocol))
-    throw new Error("gatewayUrl must use HTTP or HTTPS");
-  if (gateway.pathname !== "/" || gateway.search || gateway.hash)
-    throw new Error("gatewayUrl must be an origin without a path, query, or fragment");
-  gateway.search = "";
-  gateway.hash = "";
-  return { ...config, gatewayUrl: gateway.toString().replace(/\/$/, "") };
+const DESKTOP_SUBCOMMANDS = ["status", "start", "stop", "release"] as const;
+type DesktopSubcommand = (typeof DESKTOP_SUBCOMMANDS)[number];
+
+function isDesktopSubcommand(value: string): value is DesktopSubcommand {
+  return (DESKTOP_SUBCOMMANDS as readonly string[]).includes(value);
 }
 
-function token(config: PluginConfig): string {
+function describeVMState(current: GatewayStatus): string {
+  if (current.vmExists === false) return "not provisioned";
+  if (current.vmPrintableStatus) return current.vmPrintableStatus;
+  if (current.vmiExists && current.vmiPhase) return current.vmiPhase;
+  return "unknown";
+}
+
+function describeController(current: GatewayStatus): string {
+  if (!current.controlActive) return "nobody";
+  return current.controlActor === "human" || current.controlActor === "agent"
+    ? current.controlActor
+    : "unknown";
+}
+
+function errorLine(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function token(config: ResolvedConfig): string {
   const value = process.env[config.agentTokenEnv];
   if (!value || value.length < 24)
-    throw new Error(`${config.agentTokenEnv} must contain the Gateway PoC agent token`);
+    throw new Error(`${config.agentTokenEnv} must contain the Desktop Gateway agent token`);
   return value;
 }
 
-function agentHeaders(config: PluginConfig): Record<string, string> {
-  return {
-    Authorization: `Bearer ${token(config)}`,
-    "X-Personal-Desktop-Issuer": config.issuer,
-    "X-Personal-Desktop-Subject": config.subject,
-  };
+function agentHeaders(config: ResolvedConfig): Record<string, string> {
+  // The Gateway is provisioned per owner and derives the desktop identity from
+  // its own configuration, so the bearer is the whole request credential.
+  return { Authorization: `Bearer ${token(config)}` };
 }
 
 function handleActionFailure(action: string, error: unknown): never | {
@@ -1043,8 +1371,9 @@ function handleActionFailure(action: string, error: unknown): never | {
   details: Record<string, unknown>;
 } {
   // A Gateway-authored UnknownOutcome means the dispatch may or may not have
-  // reached the guest agent. The lease is kept; the next observe resolves the
-  // ambiguity. Every other failure is a definitive non-applied result.
+  // reached the Guest Desktop Agent. The lease is kept; the next observe
+  // resolves the ambiguity. Every other failure is a definitive non-applied
+  // result.
   if (!(error instanceof GatewayHTTPError) || error.body.outcome !== "UnknownOutcome") {
     throw error;
   }
@@ -1094,7 +1423,7 @@ export function powerUnknownOutcome(
 }
 
 async function gatewayJSON<T>(
-  config: PluginConfig,
+  config: ResolvedConfig,
   path: string,
   init?: RequestInit,
   signal?: AbortSignal,
@@ -1102,7 +1431,8 @@ async function gatewayJSON<T>(
 ): Promise<T> {
   const headers = new Headers(init?.headers);
   for (const [name, value] of Object.entries(agentHeaders(config))) headers.set(name, value);
-  const timeout = timeoutMs ?? (init?.method === "POST" ? GATEWAY_POWER_TIMEOUT_MS : GATEWAY_STATUS_TIMEOUT_MS);
+  const timeout =
+    timeoutMs ?? (init?.method === "POST" ? GATEWAY_POWER_TIMEOUT_MS : GATEWAY_STATUS_TIMEOUT_MS);
   const response = await fetch(`${config.gatewayUrl}${path}`, {
     ...init,
     headers,
@@ -1113,7 +1443,7 @@ async function gatewayJSON<T>(
   return body as T;
 }
 
-async function releaseAgentRequest(config: PluginConfig, signal?: AbortSignal): Promise<void> {
+async function releaseAgentRequest(config: ResolvedConfig, signal?: AbortSignal): Promise<void> {
   await gatewayJSON<Record<string, unknown>>(
     config,
     "/api/control/release",
@@ -1123,8 +1453,7 @@ async function releaseAgentRequest(config: PluginConfig, signal?: AbortSignal): 
   );
 }
 
-
-async function fetchFrame(config: PluginConfig, signal?: AbortSignal): Promise<Frame> {
+async function fetchFrame(config: ResolvedConfig, signal?: AbortSignal): Promise<Frame> {
   const query = new URLSearchParams({
     format: "jpeg",
     maxWidth: String(config.screenshotMaxWidth),
