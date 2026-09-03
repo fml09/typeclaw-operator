@@ -37,6 +37,7 @@ function elementRegistry() {
         value: "",
         textContent: "",
         replaceChildren() {},
+        removeAttribute() {},
       });
     }
     return elements.get(selector);
@@ -59,7 +60,7 @@ function sandbox({ element, fetch, location, exports = "" }) {
     addEventListener() {},
   });
   vm.runInContext(
-    `${moduleSource}\nglobalThis.testUI = { power, refresh, dismissToast,` +
+    `${moduleSource}\nglobalThis.testUI = { power, refresh, dismissToast, stopViewing,` +
       ` getPowerUncertain: () => powerUncertain,` +
       ` getGatewayControlBlocked: () => gatewayControlBlocked${exports} };`,
     context,
@@ -287,22 +288,26 @@ test("the top bar reports the Tailscale identity and desktop state", async () =>
   const context = sandbox({
     element,
     fetch: async (input) => {
-      assert.equal(String(input), "/api/me");
-      return jsonResponse({
-        desktopName: "inst-desktop",
-        namespace: "desktops",
-        os: "linux",
-        actor: "human",
-        authMode: "tailscale",
-        login: "alice@example.com",
-        vmExists: true,
-        vmPrintableStatus: "Running",
-        vmiExists: true,
-        vmiPhase: "Running",
-        controlActive: true,
-        controlActor: "agent",
-        controlBlocked: false,
-      });
+      const path = String(input).split("?")[0];
+      if (path === "/api/me") {
+        return jsonResponse({
+          desktopName: "inst-desktop",
+          namespace: "desktops",
+          os: "linux",
+          actor: "human",
+          authMode: "tailscale",
+          login: "alice@example.com",
+          vmExists: true,
+          vmPrintableStatus: "Running",
+          vmiExists: true,
+          vmiPhase: "Running",
+          controlActive: true,
+          controlActor: "agent",
+          controlBlocked: false,
+        });
+      }
+      if (path === "/api/screenshot") return jsonResponse({});
+      throw new Error(`unexpected fetch ${path}`);
     },
     location: { host: "desktop.example", protocol: "https:", search: "" },
   });
@@ -313,7 +318,123 @@ test("the top bar reports the Tailscale identity and desktop state", async () =>
   assert.equal(element("#os-badge").textContent, "linux");
   assert.equal(element("#chip-power").textContent, "Running");
   assert.equal(element("#chip-controller").textContent, "Agent");
-  assert.equal(element("#chip-connection").textContent, "Disconnected");
+  // A running desktop starts its read-only live view unprompted, so the top
+  // bar leaves "Disconnected" without a click.
+  assert.equal(element("#chip-connection").textContent, "Viewing");
   assert.equal(element("#dev-warning").hidden, true);
+  context.testUI.stopViewing();
+  context.testUI.dismissToast();
+});
+
+test("a running desktop brings the live view up without being asked", async () => {
+  const element = elementRegistry();
+  const requested = [];
+  const context = sandbox({
+    element,
+    fetch: async (input) => {
+      const path = String(input).split("?")[0];
+      requested.push(path);
+      if (path === "/api/me") {
+        return jsonResponse({
+          desktopName: "inst-desktop",
+          vmExists: true,
+          vmPrintableStatus: "Running",
+        });
+      }
+      if (path === "/api/screenshot") return jsonResponse({});
+      throw new Error(`unexpected fetch ${path}`);
+    },
+    location: { host: "desktop.example", protocol: "https:", search: "" },
+  });
+  await settled();
+  for (let i = 0; i < 20 && !requested.includes("/api/screenshot"); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.ok(requested.includes("/api/screenshot"), "the live view must start without a click");
+  assert.equal(element("#chip-connection").textContent, "Viewing");
+  assert.equal(element("#empty").hidden, true);
+  context.testUI.stopViewing();
+  context.testUI.dismissToast();
+});
+
+test("a stopped desktop offers its start button instead of a doomed live view", async () => {
+  const element = elementRegistry();
+  const requested = [];
+  let startCalls = 0;
+  const context = sandbox({
+    element,
+    fetch: async (input) => {
+      const path = String(input).split("?")[0];
+      requested.push(path);
+      if (path === "/api/me") {
+        return jsonResponse({
+          desktopName: "inst-desktop",
+          vmExists: true,
+          vmPrintableStatus: "Stopped",
+        });
+      }
+      if (path === "/api/power/start") {
+        startCalls += 1;
+        return jsonResponse({ action: "start", outcome: "Succeeded" }, 202);
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+    location: { host: "desktop.example", protocol: "https:", search: "" },
+  });
+  await settled();
+  await settled();
+
+  assert.equal(requested.includes("/api/screenshot"), false, "a stopped desktop must not be polled");
+  assert.equal(element("#empty-title").textContent, "The desktop is stopped");
+  assert.equal(element("#empty-action").textContent, "Start desktop");
+  assert.equal(element("#empty").hidden, false);
+
+  element("#empty-action").onclick();
+  await settled();
+
+  assert.equal(startCalls, 1, "the card's start button dispatches the power start");
+  context.testUI.stopViewing();
+  context.testUI.dismissToast();
+});
+
+test("a desktop that goes dark under the live view stops polling and shows the start card", async () => {
+  const element = elementRegistry();
+  const requested = [];
+  let running = true;
+  const context = sandbox({
+    element,
+    fetch: async (input) => {
+      const path = String(input).split("?")[0];
+      requested.push(path);
+      if (path === "/api/me") {
+        return jsonResponse({
+          desktopName: "inst-desktop",
+          vmExists: true,
+          vmPrintableStatus: running ? "Running" : "Stopped",
+        });
+      }
+      if (path === "/api/screenshot") {
+        if (!running) return jsonResponse({ detail: "not running" }, 409);
+        return jsonResponse({});
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+    location: { host: "desktop.example", protocol: "https:", search: "" },
+  });
+  await settled();
+  for (let i = 0; i < 20 && !requested.includes("/api/screenshot"); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(requested.includes("/api/screenshot"), "precondition: the live view started");
+
+  running = false;
+  await context.testUI.refresh();
+
+  assert.equal(element("#chip-connection").textContent, "Disconnected");
+  assert.equal(element("#empty-title").textContent, "The desktop is stopped");
+  assert.equal(element("#empty-action").textContent, "Start desktop");
+  assert.equal(element("#empty").hidden, false);
+  context.testUI.stopViewing();
   context.testUI.dismissToast();
 });

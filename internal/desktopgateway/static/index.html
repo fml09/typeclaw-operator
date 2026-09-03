@@ -65,6 +65,9 @@
     .screen { display: grid; place-items: center; width: 100%; height: 100%; overflow: auto; }
     .screen[data-fit="false"] { place-items: start; }
     #fallback { display: block; max-width: 100%; max-height: 78vh; }
+    /* display: block above outranks the UA's [hidden] rule; without this the
+       img keeps painting its alt text over the empty-state card. */
+    #fallback[hidden] { display: none; }
     .screen[data-fit="false"] #fallback { max-width: none; max-height: none; }
     #screen canvas { max-width: 100%; }
     .stage[data-controlling="true"] { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -75,6 +78,9 @@
       text-transform: uppercase; color: #b9c6d1; background: rgba(10, 14, 18, .62); border: 1px solid var(--line);
     }
     .empty { position: absolute; inset: 0; display: grid; place-content: center; padding: 24px; }
+    /* display: grid above outranks the UA's [hidden] rule, so without this
+       the card keeps floating over the live view it claims is not shown. */
+    .empty[hidden] { display: none; }
     .empty-card {
       display: grid; justify-items: center; gap: 12px; max-width: 34ch; text-align: center;
       color: var(--muted); font-size: 13.5px; line-height: 1.6;
@@ -179,8 +185,8 @@
               <rect x="2.6" y="4.2" width="18.8" height="12.6" rx="2.2"></rect>
               <path d="M8.4 20.4h7.2M12 16.8v3.6"></path>
             </svg>
-            <strong>The screen is not being shown</strong>
-            <span>Live view polls screenshots and sends no input. Taking control opens an
+            <strong id="empty-title">The screen is not being shown</strong>
+            <span id="empty-hint">Live view polls screenshots and sends no input. Taking control opens an
               interactive session, and only one controller exists at a time.</span>
             <button id="empty-action" class="primary">Start live view</button>
           </div>
@@ -248,6 +254,9 @@
     const screen = document.querySelector('#screen');
     const stage = document.querySelector('#stage');
     const empty = document.querySelector('#empty');
+    const emptyTitle = document.querySelector('#empty-title');
+    const emptyHint = document.querySelector('#empty-hint');
+    const emptyAction = document.querySelector('#empty-action');
     const watermark = document.querySelector('#watermark');
     const startButton = document.querySelector('#start');
     const stopButton = document.querySelector('#stop');
@@ -281,6 +290,7 @@
     let lastStatus;
     let toastTimer;
     let fitToWindow = true;
+    let emptyActionKind = 'view';
     const logLines = [];
     screen.dataset.controlConnected = 'false';
 
@@ -396,10 +406,54 @@
         applyPowerPolicy();
         applyControlPolicy();
         renderChips(gatewayStatus);
+        applyScreenState(gatewayStatus);
         status.textContent = JSON.stringify(statusDocument(gatewayStatus), null, 2);
       } catch (error) {
         status.textContent = `Error: ${error.message}`;
         toast(`Status unavailable: ${error.message}`);
+      }
+    }
+
+    // A running desktop shows its screen without being asked. The live view
+    // is read-only screenshot polling, so starting it unprompted is safe,
+    // while interactive control still waits for an explicit click. Re-running
+    // the check on every refresh is what brings the screen back after control
+    // ends or the VM finishes booting — and stops a poll the Gateway has
+    // proven is watching a dark screen.
+    function applyScreenState(gatewayStatus) {
+      if (rfb) return;
+      if (desktopRunning(gatewayStatus)) {
+        if (!pollTimer) startViewing();
+        return;
+      }
+      if (pollTimer) {
+        stopViewing();
+        applyControlPolicy();
+      }
+      renderEmptyState(gatewayStatus);
+    }
+
+    function desktopRunning(gatewayStatus) {
+      return Boolean(gatewayStatus)
+        && gatewayStatus.vmExists !== false
+        && gatewayStatus.vmPrintableStatus === 'Running';
+    }
+
+    // The empty card matches the desktop state. When the VM is stopped,
+    // "Start live view" would only poll a dark screen, so the card offers the
+    // start button instead, and the view comes up by itself once it runs.
+    function renderEmptyState(gatewayStatus) {
+      if (gatewayStatus && gatewayStatus.vmExists !== false
+          && gatewayStatus.vmPrintableStatus === 'Stopped') {
+        emptyTitle.textContent = 'The desktop is stopped';
+        emptyHint.textContent = 'Start it, and the live view comes up on its own. Live view polls screenshots and sends no input.';
+        emptyAction.textContent = 'Start desktop';
+        emptyActionKind = 'power';
+      } else {
+        emptyTitle.textContent = 'The screen is not being shown';
+        emptyHint.textContent = 'Live view polls screenshots and sends no input. Taking control opens an interactive session, and only one controller exists at a time.';
+        emptyAction.textContent = 'Start live view';
+        emptyActionKind = 'view';
       }
     }
 
@@ -588,7 +642,10 @@
 
     document.querySelector('#refresh').onclick = refresh;
     viewButton.onclick = startViewing;
-    document.querySelector('#empty-action').onclick = startViewing;
+    emptyAction.onclick = () => {
+      if (emptyActionKind === 'power') power('start');
+      else startViewing();
+    };
     controlButton.onclick = () => startControl(false).catch(error => toast(`Control failed: ${error.message}`));
     takeoverButton.onclick = () => startControl(true).catch(error => toast(`Takeover failed: ${error.message}`));
     releaseButton.onclick = () => { stopControl(); startViewing(); };
