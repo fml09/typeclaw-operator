@@ -108,3 +108,61 @@ func TestCloudInitQuotesAdministratorInput(t *testing.T) {
 		t.Fatalf("username was not escaped as a YAML double-quoted scalar:\n%s", userData)
 	}
 }
+
+// TestNetworkDataMatchesByNameNotMAC pins the fix for a failure that only
+// appears on the second power-on, which makes it very easy to ship.
+//
+// A desktop is powered off and on by its owner (runStrategy Manual), and each
+// power-on builds a new VMI whose interface gets a freshly generated MAC
+// unless the spec pins one. If the guest's netplan matched on a hardware
+// address it would match nothing from then on: no link, no DHCP, no address,
+// and a desktop agent that runs perfectly while answering nobody.
+func TestNetworkDataMatchesByNameNotMAC(t *testing.T) {
+	data := CloudInitNetworkData()
+	if strings.Contains(strings.ToLower(data), "macaddress") {
+		t.Fatalf("network data must not pin a hardware address:\n%s", data)
+	}
+	for _, want := range []string{"version: 2", "match:", "name: \"en*\"", "dhcp4: true"} {
+		if !strings.Contains(data, want) {
+			t.Errorf("network data is missing %q:\n%s", want, data)
+		}
+	}
+}
+
+// TestCloudInitSecretCarriesNetworkData: KubeVirt reads the networkdata key
+// through networkDataSecretRef, so the key has to be in the same Secret the VM
+// already references.
+func TestCloudInitSecretCarriesNetworkData(t *testing.T) {
+	secret := CloudInitSecret(sidecarInstance(), "guest-token")
+	if _, ok := secret.Data[CloudInitNetworkDataKey]; !ok {
+		t.Fatalf("Secret is missing key %q; KubeVirt would fall back to a MAC-pinned netplan", CloudInitNetworkDataKey)
+	}
+	if _, ok := secret.Data[CloudInitUserDataKey]; !ok {
+		t.Fatalf("Secret is missing key %q", CloudInitUserDataKey)
+	}
+}
+
+// TestLightLockerIsSuppressed: the desktop account has no password
+// (lock_passwd), so if light-locker ever locks the seat the session is
+// unreachable by anyone, agent or owner, until the VM is power-cycled.
+func TestLightLockerIsSuppressed(t *testing.T) {
+	data := CloudInitUserData(sidecarInstance(), "guest-token")
+	path := lightLockerOverridePath(Username(sidecarInstance().Spec.PersonalDesktop))
+	if !strings.Contains(data, path) {
+		t.Fatalf("no light-locker override was written:\n%s", data)
+	}
+	if !strings.Contains(data, "/home/") {
+		t.Error("the override must live in the user's home; a /etc/xdg copy is clobbered when the package installs")
+	}
+	// Locate the entry and confirm it is deferred: cloud-init installs
+	// light-locker later in the same boot.
+	idx := strings.Index(data, path)
+	tail := data[idx:]
+	end := strings.Index(tail, "  - path:")
+	if end == -1 {
+		end = len(tail)
+	}
+	if !strings.Contains(tail[:end], "defer: true") {
+		t.Fatalf("the override must be deferred or the package install overwrites it:\n%s", tail[:end])
+	}
+}

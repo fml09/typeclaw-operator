@@ -27,6 +27,10 @@ import (
 )
 
 const (
+	// CloudInitNetworkDataKey is the Secret key KubeVirt reads the NoCloud
+	// network configuration from.
+	CloudInitNetworkDataKey = "networkdata"
+
 	// CloudInitUserDataKey is the Secret key KubeVirt reads the NoCloud user
 	// data from.
 	CloudInitUserDataKey = "userdata"
@@ -66,7 +70,8 @@ func CloudInitSecret(instance *typeclawv1alpha1.TypeClawInstance, guestToken str
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
-			CloudInitUserDataKey: []byte(CloudInitUserData(instance, guestToken)),
+			CloudInitUserDataKey:    []byte(CloudInitUserData(instance, guestToken)),
+			CloudInitNetworkDataKey: []byte(CloudInitNetworkData()),
 		},
 	}
 }
@@ -121,6 +126,21 @@ func CloudInitUserData(instance *typeclawv1alpha1.TypeClawInstance, guestToken s
 	// create ~/.config as root on the way to the entry, and an XFCE session
 	// that cannot write its own config directory comes up broken.
 	writeFile(&b, autostartPath, "root:root", "0644", autostartEntry(), false)
+	// Suppress light-locker for the desktop user.
+	//
+	// The session script turns the X screensaver and DPMS off once at session
+	// start, but xfce4-power-manager comes up afterwards, reads its own xfconf
+	// timers and re-arms blanking. When it fires, light-locker locks the seat
+	// and switches to the greeter — and the desktop account is lock_passwd, so
+	// there is no password that could unlock it. The agent keeps screenshotting
+	// and typing at a session nobody can reach, and nothing in the Instance
+	// status says why.
+	//
+	// It is deferred and user-owned on purpose. The light-locker package is
+	// installed later in the same boot, and a non-deferred write into
+	// /etc/xdg/autostart is clobbered when it lands.
+	writeFile(&b, lightLockerOverridePath(username), username+":"+username, "0644",
+		lightLockerOverride(), true)
 
 	// Ubuntu's lightdm package prompts for the default display manager when
 	// gdm3 is already installed; an unattended first boot would stall there.
@@ -203,4 +223,50 @@ func yamlString(value string) string {
 		return `""`
 	}
 	return string(encoded)
+}
+
+// CloudInitNetworkData renders the guest's netplan, matching the interface by
+// name rather than by hardware address.
+//
+// Supplying this at all is the point. Without a networkData document cloud-init
+// falls back to generating its own, and that fallback pins the interface it
+// found on first boot by MAC:
+//
+//	ethernets:
+//	  enp1s0:
+//	    match: {macaddress: "52:54:00:12:34:56"}
+//
+// It writes that to /etc/netplan on the persistent root disk. A desktop's
+// normal lifecycle is the owner powering it off and on (runStrategy Manual),
+// and every power-on builds a new VMI with a freshly generated MAC unless one
+// is pinned in the spec. The guest then boots with a netplan that matches no
+// interface present, never brings the link up, never DHCPs, and has no
+// address — while the desktop agent inside it runs perfectly and answers
+// nothing. Matching on "en*" instead survives any MAC the hypervisor picks, so
+// a cloned disk needs no pinned address, and an adopted one stops depending on
+// the caller remembering to pin the right one.
+func CloudInitNetworkData() string {
+	return "version: 2\n" +
+		"ethernets:\n" +
+		"  primary:\n" +
+		"    match:\n" +
+		"      name: \"en*\"\n" +
+		"    dhcp4: true\n" +
+		"    dhcp6: false\n"
+}
+
+// lightLockerOverridePath is the per-user autostart entry that shadows the
+// system-wide light-locker one. A user entry of the same basename wins over
+// /etc/xdg/autostart, which is how a desktop session is meant to be overridden.
+func lightLockerOverridePath(username string) string {
+	return "/home/" + username + "/.config/autostart/light-locker.desktop"
+}
+
+// lightLockerOverride is a hidden desktop entry: Hidden=true tells the session
+// to skip the entry it shadows entirely, rather than run it and hope it exits.
+func lightLockerOverride() string {
+	return "[Desktop Entry]\n" +
+		"Type=Application\n" +
+		"Name=Light Locker\n" +
+		"Hidden=true\n"
 }
