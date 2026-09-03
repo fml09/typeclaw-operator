@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -290,5 +291,62 @@ func TestGatewayPodSetsFSGroup(t *testing.T) {
 	}
 	if sc.RunAsUser == nil || *sc.FSGroup != *sc.RunAsUser {
 		t.Fatalf("fsGroup %v does not match runAsUser %v", sc.FSGroup, sc.RunAsUser)
+	}
+}
+
+// TestSidecarStateIsPersistent pins the fix for a console address that moved
+// underneath its owner.
+//
+// tailscaled's node identity lives in its state directory. On an emptyDir that
+// identity is lost with the Pod, so the next start re-registers as a new node —
+// and if the previous device has not been reaped yet, the control plane hands
+// out a suffixed MagicDNS name. Observed live: the Pod asked for hostname
+// "kakao-desktop" and came up serving "kakao-desktop-1", while the reported
+// console URL kept naming the first.
+func TestSidecarStateIsPersistent(t *testing.T) {
+	in := sidecarInstance()
+	pod := GatewayDeployment(in, "operator:test", "").Spec.Template.Spec
+
+	var state *corev1.Volume
+	for i := range pod.Volumes {
+		if pod.Volumes[i].Name == "tailscale-state" {
+			state = &pod.Volumes[i]
+		}
+	}
+	if state == nil {
+		t.Fatal("no state volume is rendered")
+	}
+	if state.EmptyDir != nil {
+		t.Fatal("tailscaled state must survive a restart; an emptyDir loses the node identity")
+	}
+	if state.PersistentVolumeClaim == nil {
+		t.Fatal("state must be backed by a PersistentVolumeClaim")
+	}
+	if state.PersistentVolumeClaim.ClaimName != Names(in).GatewayState {
+		t.Fatalf("claim %q does not match the rendered PVC name", state.PersistentVolumeClaim.ClaimName)
+	}
+
+	claim := GatewayStateClaim(in)
+	if claim == nil {
+		t.Fatal("Sidecar mode must render the state claim it mounts")
+	}
+	if claim.Name != Names(in).GatewayState {
+		t.Fatalf("claim name = %q", claim.Name)
+	}
+
+	// A ReadWriteOnce claim is only safe because the Deployment never runs two
+	// Pods at once.
+	if GatewayDeployment(in, "operator:test", "").Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+		t.Fatal("a ReadWriteOnce state claim requires the Recreate strategy")
+	}
+}
+
+// TestIngressModeRendersNoStateClaim: the claim exists only for the sidecar.
+func TestIngressModeRendersNoStateClaim(t *testing.T) {
+	in := sidecarInstance(func(in *typeclawv1alpha1.TypeClawInstance) {
+		in.Spec.PersonalDesktop.Access.Tailscale.Mode = ConsoleModeIngress
+	})
+	if GatewayStateClaim(in) != nil {
+		t.Fatal("Ingress mode runs no tailscaled and needs no state claim")
 	}
 }

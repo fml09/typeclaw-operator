@@ -534,6 +534,25 @@ func (r *PersonalDesktopReconciler) applyGateway(
 		return false, fmt.Errorf("apply gateway Service: %w", err)
 	}
 
+	// The state claim must exist before the Deployment that mounts it. It is
+	// created and then left alone: it holds tailscaled's node identity, and
+	// replacing it renames the console out from under its owner.
+	if claim := desktop.GatewayStateClaim(instance); claim != nil {
+		existing := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: names.GatewayState, Namespace: names.Namespace},
+		}
+		if err := r.applyDesktopObject(ctx, instance, existing, func() error {
+			// Only on creation: a PVC's spec is almost entirely immutable, and
+			// re-offering it on every reconcile fights admission.
+			if existing.CreationTimestamp.IsZero() {
+				existing.Spec = desktop.GatewayStateClaim(instance).Spec
+			}
+			return nil
+		}); err != nil {
+			return false, fmt.Errorf("apply gateway state claim: %w", err)
+		}
+	}
+
 	// The Serve config must exist before the Deployment that mounts it, or the
 	// Pod sits in ContainerCreating waiting for a ConfigMap nobody wrote.
 	if serve := desktop.GatewayServeConfig(instance); serve != nil {
@@ -655,6 +674,7 @@ func (r *PersonalDesktopReconciler) desktopCleanup(
 		&corev1.Secret{ObjectMeta: at(names.Namespace, names.Sysprep)},
 		&corev1.ConfigMap{ObjectMeta: at(names.InstanceNamespace, names.Extension)},
 		&corev1.ConfigMap{ObjectMeta: at(names.Namespace, names.ServeConfig)},
+		&corev1.PersistentVolumeClaim{ObjectMeta: at(names.Namespace, names.GatewayState)},
 	}
 	if desktop.CrossNamespace(instance) {
 		objects = append(objects, &corev1.Secret{ObjectMeta: at(names.InstanceNamespace, names.Tokens)})

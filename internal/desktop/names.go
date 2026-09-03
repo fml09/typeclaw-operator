@@ -80,9 +80,21 @@ const (
 	// ServeConfigMountPath is where that config is projected. TS_SERVE_CONFIG
 	// points at the file inside it.
 	ServeConfigMountPath = "/etc/tailscaled"
-	// TailscaleStateVolumePath is where the state emptyDir is mounted, and
+	// TailscaleStateSize is the claim behind tailscaled's state. It holds a
+	// node key and a certificate, so it is small; the minimum a provisioner
+	// will grant is the practical floor.
+	TailscaleStateSize = "1Gi"
+
+	// TailscaleStateVolumePath is where the state volume is mounted, and
 	// TailscaleStateDir is the directory inside it that tailscaled actually
 	// uses. They differ by one level on purpose.
+	//
+	// The volume is a PersistentVolumeClaim rather than an emptyDir because
+	// tailscaled's node identity lives in it. On an emptyDir the identity is
+	// lost on every restart, the node re-registers, and the control plane hands
+	// it a suffixed name when the previous device has not been reaped yet --
+	// so the console moved between kakao-desktop and kakao-desktop-1 across
+	// restarts while the reported URL kept naming the first.
 	//
 	// A volume mount point is created by the kubelet and owned by root. fsGroup
 	// makes it group-writable, which is enough to create files in it but not to
@@ -133,6 +145,7 @@ type NameSet struct {
 	ConsoleIngress string
 	Extension      string
 	ServeConfig    string
+	GatewayState   string
 }
 
 // Names derives every object name for one Instance. It is safe on an Instance
@@ -154,6 +167,7 @@ func Names(instance *typeclawv1alpha1.TypeClawInstance) NameSet {
 		ConsoleIngress:    desktop + "-console",
 		Extension:         desktop + "-extension",
 		ServeConfig:       desktop + "-serve-config",
+		GatewayState:      desktop + "-gateway-state",
 	}
 	if spec := instance.Spec.PersonalDesktop; spec != nil {
 		names.GoldenVolume = spec.Image.GoldenDataVolume
