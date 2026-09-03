@@ -273,18 +273,35 @@ export function observationIsFresh(
 
 class ConfigResolutionError extends Error {}
 
-// Resolved once at plugin start. An explicit typeclaw.json value always beats
-// the environment: the operator injects PERSONAL_DESKTOP_* into every Managed
-// Runtime, so an administrator who deliberately overrides one in the Agent
-// Folder must not have that override silently replaced by the platform default.
+// Resolved once at plugin start.
+//
+// Where the desktop lives is decided by the platform, not by the Agent Folder.
+// typeclaw.json is the agent's own writable state, so a value read from there
+// could point this extension's screenshots and keystrokes at any endpoint the
+// runtime can reach — the model would be choosing which machine it drives, and
+// who sees the frames. When the operator injected a gateway URL, that value
+// wins and a differing one in typeclaw.json is ignored with a warning.
+//
+// The typeclaw.json value is still honored when the platform supplied none,
+// which is how a host-mode or local development runtime configures the
+// extension at all. The remaining fields are bounds and preferences rather than
+// targets, so an Agent Folder value is allowed to refine them.
 export function resolvePluginConfig(
   config: PluginConfig,
   env: Record<string, string | undefined>,
+  logger?: { warn: (message: string) => void },
 ): ConfigResolution {
   try {
+    const platformGatewayUrl = trimmed(env[GATEWAY_URL_ENV]);
     const configuredGatewayUrl = trimmed(config?.gatewayUrl);
-    const gatewayUrlSource = configuredGatewayUrl ? "gatewayUrl in typeclaw.json" : GATEWAY_URL_ENV;
-    const gatewayUrlValue = configuredGatewayUrl ?? trimmed(env[GATEWAY_URL_ENV]);
+    if (platformGatewayUrl && configuredGatewayUrl && platformGatewayUrl !== configuredGatewayUrl) {
+      logger?.warn(
+        `ignoring gatewayUrl in typeclaw.json (${configuredGatewayUrl}): the platform set ` +
+          `${GATEWAY_URL_ENV} and decides which desktop this runtime drives`,
+      );
+    }
+    const gatewayUrlSource = platformGatewayUrl ? GATEWAY_URL_ENV : "gatewayUrl in typeclaw.json";
+    const gatewayUrlValue = platformGatewayUrl ?? configuredGatewayUrl;
     if (!gatewayUrlValue) return { unavailable: `${GATEWAY_URL_ENV} is not set` };
     return {
       config: {
@@ -360,7 +377,7 @@ export default definePlugin({
   permissions: [CONTROL_PERMISSION],
   configSchema,
   async plugin(ctx) {
-    const resolution = resolvePluginConfig(ctx.config, process.env);
+    const resolution = resolvePluginConfig(ctx.config, process.env, ctx.logger);
     const resolvedConfig = "config" in resolution ? resolution.config : undefined;
     const unavailableReason = "unavailable" in resolution ? resolution.unavailable : undefined;
     if (unavailableReason) {

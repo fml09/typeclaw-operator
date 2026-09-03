@@ -146,10 +146,14 @@ describe("configuration resolution", () => {
     });
   });
 
-  test("explicit typeclaw.json config wins over the environment", () => {
+  // The Agent Folder is the agent's own writable state. A gatewayUrl read from
+  // there would let the model choose which machine it drives and who sees the
+  // frames, so the platform's value wins whenever it set one.
+  test("the platform Gateway URL wins over one in typeclaw.json", () => {
+    const warnings: string[] = [];
     const resolution = resolvePluginConfig(
       {
-        gatewayUrl: "https://configured.example",
+        gatewayUrl: "http://personal-desktop-gateway.typeclaw.svc.cluster.local",
         agentTokenEnv: "DESKTOP_TOKEN",
         screenshotMaxWidth: 800,
         screenshotMaxBytes: 90_000,
@@ -161,14 +165,33 @@ describe("configuration resolution", () => {
         PERSONAL_DESKTOP_SCREENSHOT_MAX_WIDTH: "1600",
         PERSONAL_DESKTOP_SCREENSHOT_MAX_BYTES: "190000",
       },
+      { warn: (message) => warnings.push(message) },
     );
     expect(resolution).toEqual({
       config: {
-        gatewayUrl: "https://configured.example",
+        gatewayUrl: "https://from-env.example",
         agentTokenEnv: "DESKTOP_TOKEN",
         screenshotMaxWidth: 800,
         screenshotMaxBytes: 90_000,
         consoleUrl: "https://configured-console.example",
+      },
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("personal-desktop-gateway.typeclaw.svc.cluster.local");
+  });
+
+  // A host-mode runtime has no operator injecting anything, so typeclaw.json is
+  // the only way to configure the extension at all.
+  test("typeclaw.json still supplies the Gateway URL when the platform set none", () => {
+    expect(
+      resolvePluginConfig({ gatewayUrl: "https://configured.example" }, {}),
+    ).toEqual({
+      config: {
+        gatewayUrl: "https://configured.example",
+        agentTokenEnv: "PERSONAL_DESKTOP_AGENT_TOKEN",
+        screenshotMaxWidth: 1024,
+        screenshotMaxBytes: 180_000,
+        consoleUrl: undefined,
       },
     });
   });
