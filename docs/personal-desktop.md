@@ -293,7 +293,16 @@ terminates tailnet TLS and attaches the identity headers. The console address is
 known from the spec, so `status.personalDesktop.consoleURL` is set immediately
 rather than after the tailnet device appears.
 
-It needs one tailnet credential, named by `access.tailscale.authSecret` — a
+It needs `access.tailscale.tailnet`, your tailnet's MagicDNS domain (for
+example `tailnet-name.ts.net`). The operator cannot discover it, and the console
+address is built as `https://<hostname>.<tailnet>`. Do not be tempted to leave
+it out and rely on the short MagicDNS label: the label resolves inside the
+tailnet, but tailscaled holds a certificate for the fully qualified name, so a
+browser opening the short form fails TLS verification. A link that looks right
+and cannot open is worse than an error, which is why the operator refuses to
+render a Sidecar console without it.
+
+It also needs one tailnet credential, named by `access.tailscale.authSecret` — a
 Secret in the desktop namespace holding either `TS_AUTHKEY` (a reusable,
 pre-authorized, **ephemeral** key) or `TS_CLIENT_ID` and `TS_CLIENT_SECRET`. The
 key must be ephemeral: the sidecar keeps its node state on an `emptyDir` rather

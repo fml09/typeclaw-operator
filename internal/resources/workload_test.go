@@ -569,6 +569,7 @@ func TestSidecarConsoleURLComesFromSpec(t *testing.T) {
 				Hostname:   "kakao-desktop",
 				Mode:       desktop.ConsoleModeSidecar,
 				AuthSecret: "tailscale-console",
+				Tailnet:    "tail2a8c6b.ts.net",
 			},
 		}
 	})
@@ -577,7 +578,7 @@ func TestSidecarConsoleURLComesFromSpec(t *testing.T) {
 		t.Fatalf("StatefulSet() error: %v", err)
 	}
 	env, found := envNamed(sts.Spec.Template.Spec.Containers[0], "PERSONAL_DESKTOP_CONSOLE_URL")
-	if !found || env.Value != "https://kakao-desktop" {
+	if !found || env.Value != "https://kakao-desktop.tail2a8c6b.ts.net" {
 		t.Fatalf("console URL = %q (found %t), want the spec-derived MagicDNS name", env.Value, found)
 	}
 }

@@ -24,6 +24,7 @@ func sidecarInstance(mutate ...func(*typeclawv1alpha1.TypeClawInstance)) *typecl
 						Hostname:   "kakao-desktop",
 						Mode:       ConsoleModeSidecar,
 						AuthSecret: "tailscale-console",
+						Tailnet:    "tail2a8c6b.ts.net",
 					},
 				},
 			},
@@ -203,6 +204,19 @@ func TestServeConfigProxiesToLoopback(t *testing.T) {
 	}
 }
 
+func TestSidecarModeRequiresATailnet(t *testing.T) {
+	in := sidecarInstance(func(in *typeclawv1alpha1.TypeClawInstance) {
+		in.Spec.PersonalDesktop.Access.Tailscale.Tailnet = ""
+	})
+	err := Validate(in)
+	if err == nil {
+		t.Fatal("without a tailnet the console URL fails TLS verification; it must not validate")
+	}
+	if !strings.Contains(err.Error(), "tailnet") {
+		t.Fatalf("error %q should name the missing field", err)
+	}
+}
+
 func TestSidecarModeRequiresAnAuthSecret(t *testing.T) {
 	in := sidecarInstance(func(in *typeclawv1alpha1.TypeClawInstance) {
 		in.Spec.PersonalDesktop.Access.Tailscale.AuthSecret = ""
@@ -220,8 +234,11 @@ func TestSidecarModeRequiresAnAuthSecret(t *testing.T) {
 // address that is only knowable from observed status ends up in the Runtime's
 // Pod template and restarts the agent when it changes.
 func TestConsoleURLIsSpecDerivedInSidecarMode(t *testing.T) {
-	if got := ConsoleURL(sidecarInstance(), nil); got != "https://kakao-desktop" {
-		t.Fatalf("console URL = %q, want the spec-derived MagicDNS name", got)
+	// The FULL MagicDNS name. The bare label resolves inside the tailnet and
+	// then fails TLS verification, because tailscaled holds a certificate for
+	// <hostname>.<tailnet> — a link that looks right and cannot open.
+	if got := ConsoleURL(sidecarInstance(), nil); got != "https://kakao-desktop.tail2a8c6b.ts.net" {
+		t.Fatalf("console URL = %q, want the fully qualified MagicDNS name", got)
 	}
 	ingressOnly := sidecarInstance(func(in *typeclawv1alpha1.TypeClawInstance) {
 		in.Spec.PersonalDesktop.Access.Tailscale.Mode = ConsoleModeIngress

@@ -52,9 +52,19 @@ func Validate(instance *typeclawv1alpha1.TypeClawInstance) error {
 		// keeps the Gateway Pod from being rendered at all, which is better
 		// than rendering one whose tailscaled can never authenticate and whose
 		// console therefore never appears, with nothing saying why.
-		if ConsoleMode(spec) == ConsoleModeSidecar && spec.Access.Tailscale.AuthSecret == "" {
-			return errors.New(
-				"spec.personalDesktop.access.tailscale.authSecret is required when mode is Sidecar")
+		if ConsoleMode(spec) == ConsoleModeSidecar {
+			if spec.Access.Tailscale.AuthSecret == "" {
+				return errors.New(
+					"spec.personalDesktop.access.tailscale.authSecret is required when mode is Sidecar")
+			}
+			// Without it the operator can only name the console by its short
+			// MagicDNS label, which resolves and then fails TLS verification
+			// against a certificate issued for the full name. Refusing here is
+			// better than publishing a link that looks right and cannot open.
+			if spec.Access.Tailscale.Tailnet == "" {
+				return errors.New(
+					"spec.personalDesktop.access.tailscale.tailnet is required when mode is Sidecar")
+			}
 		}
 	}
 	return nil
