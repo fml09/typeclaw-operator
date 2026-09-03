@@ -128,6 +128,27 @@ func TestSidecarRendersTailscaledBesideTheGateway(t *testing.T) {
 	if env["TS_STATE_DIR"].Value != TailscaleStateDir {
 		t.Errorf("TS_STATE_DIR = %q, want %q", env["TS_STATE_DIR"].Value, TailscaleStateDir)
 	}
+	// The state directory must sit BELOW the mount point, never at it. A mount
+	// point is root-owned; fsGroup makes it writable but not chmod-able, and
+	// tailscaled chmods its state directory on startup. One level deeper it
+	// creates the directory itself and therefore owns it.
+	var stateMount *corev1.VolumeMount
+	for i := range sidecar.VolumeMounts {
+		if sidecar.VolumeMounts[i].Name == "tailscale-state" {
+			stateMount = &sidecar.VolumeMounts[i]
+		}
+	}
+	if stateMount == nil {
+		t.Fatal("no state volume is mounted")
+	}
+	if stateMount.MountPath == env["TS_STATE_DIR"].Value {
+		t.Fatalf("TS_STATE_DIR %q is the mount point itself; tailscaled cannot chmod a root-owned mount point",
+			stateMount.MountPath)
+	}
+	if !strings.HasPrefix(env["TS_STATE_DIR"].Value, stateMount.MountPath+"/") {
+		t.Fatalf("TS_STATE_DIR %q is not inside the mounted volume %q",
+			env["TS_STATE_DIR"].Value, stateMount.MountPath)
+	}
 	// Either credential shape may be the one the Secret carries, so both
 	// references must be optional or the Pod cannot start with only one.
 	for _, key := range []string{"TS_AUTHKEY", "TS_CLIENT_ID", "TS_CLIENT_SECRET"} {

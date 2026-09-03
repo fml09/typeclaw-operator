@@ -80,9 +80,18 @@ const (
 	// ServeConfigMountPath is where that config is projected. TS_SERVE_CONFIG
 	// points at the file inside it.
 	ServeConfigMountPath = "/etc/tailscaled"
-	// TailscaleStateDir holds tailscaled's node state on an emptyDir, so the
-	// device is ephemeral and the Gateway needs no extra Kubernetes rights.
-	TailscaleStateDir = "/var/lib/tailscale"
+	// TailscaleStateVolumePath is where the state emptyDir is mounted, and
+	// TailscaleStateDir is the directory inside it that tailscaled actually
+	// uses. They differ by one level on purpose.
+	//
+	// A volume mount point is created by the kubelet and owned by root. fsGroup
+	// makes it group-writable, which is enough to create files in it but not to
+	// chmod it -- and tailscaled chmods its state directory on startup, failing
+	// with "creating state directory: chmod ...: operation not permitted" and
+	// falling back to an in-memory store. Pointing one level deeper lets
+	// tailscaled create that directory itself, so it owns what it chmods.
+	TailscaleStateVolumePath = "/var/lib/tailscale"
+	TailscaleStateDir        = TailscaleStateVolumePath + "/state"
 
 	// DefaultTailscaleImage is the tailscaled the console sidecar runs. It
 	// tracks the image the Tailscale Kubernetes operator uses for its own

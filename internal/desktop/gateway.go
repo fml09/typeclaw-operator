@@ -392,7 +392,7 @@ func tailscaleSidecar(instance *typeclawv1alpha1.TypeClawInstance) *corev1.Conta
 		Env:             env,
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "serve-config", MountPath: ServeConfigMountPath, ReadOnly: true},
-			{Name: "tailscale-state", MountPath: TailscaleStateDir},
+			{Name: "tailscale-state", MountPath: TailscaleStateVolumePath},
 			{Name: "tailscale-tmp", MountPath: "/tmp"},
 		},
 		SecurityContext: &corev1.SecurityContext{
