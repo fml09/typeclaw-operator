@@ -196,3 +196,47 @@ func TestVMPrintableStatusAccessor(t *testing.T) {
 		t.Fatalf("printable status accessor did not read status.printableStatus")
 	}
 }
+
+// A desktop cloned from a golden image must not pin a MAC: KubeVirt assigns
+// one and the guest's first boot writes matching network configuration.
+func TestVMOmitsTheMACAddressWhenUnset(t *testing.T) {
+	vm := VM(desktopInstance(nil))
+
+	iface := firstInterface(t, vm)
+	if _, pinned := iface["macAddress"]; pinned {
+		t.Fatalf("interface pinned a MAC address without one being declared: %v", iface)
+	}
+}
+
+// Adopting a disk that has already booted is the case the field exists for:
+// the guest's persisted netplan matches by MAC, so the address has to come
+// back exactly as the disk remembers it.
+func TestVMPinsTheDeclaredMACAddressForAnAdoptedDisk(t *testing.T) {
+	const declared = "72:23:c8:e8:e9:be"
+	vm := VM(desktopInstance(func(in *typeclawv1alpha1.TypeClawInstance) {
+		in.Spec.PersonalDesktop.MACAddress = declared
+		in.Spec.PersonalDesktop.RootVolume.ExistingDataVolume = "pd-def2f73d11aa05e5ab3d-root"
+	}))
+
+	iface := firstInterface(t, vm)
+	if got := iface["macAddress"]; got != declared {
+		t.Fatalf("interface macAddress = %v, want %q", got, declared)
+	}
+	if _, ok := iface["masquerade"]; !ok {
+		t.Fatalf("pinning a MAC dropped the masquerade binding: %v", iface)
+	}
+}
+
+func firstInterface(t *testing.T, vm *unstructured.Unstructured) map[string]any {
+	t.Helper()
+	interfaces, found, err := unstructured.NestedSlice(vm.Object,
+		"spec", "template", "spec", "domain", "devices", "interfaces")
+	if err != nil || !found || len(interfaces) != 1 {
+		t.Fatalf("interfaces = %v (found %v, err %v), want exactly one", interfaces, found, err)
+	}
+	iface, ok := interfaces[0].(map[string]any)
+	if !ok {
+		t.Fatalf("interface is %T, want map", interfaces[0])
+	}
+	return iface
+}

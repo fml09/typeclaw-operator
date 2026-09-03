@@ -457,9 +457,26 @@ spec:
   personalDesktop:
     enabled: true
     namespace: personal-desktop-poc   # the namespace the PoC disk lives in
+    macAddress: 72:23:c8:e8:e9:be     # the address the disk was provisioned with
     rootVolume:
       existingDataVolume: pd-9f2c1a4b7de03e51ab77-root
 ```
+
+`macAddress` is the part of adoption that is easy to miss and hard to diagnose.
+A Linux guest that has already booted writes network configuration matching the
+interface it saw, by hardware address. Bring the disk back on a
+KubeVirt-assigned address and the guest finds no interface it recognizes and
+comes up with no network at all, which looks like a broken desktop rather than a
+configuration mismatch. Read the address off the PoC VM before deleting it:
+
+```sh
+kubectl -n <ns> get vm <poc-vm> \
+  -o jsonpath='{.spec.template.spec.domain.devices.interfaces[0].macAddress}'
+```
+
+Leave `macAddress` unset for any desktop cloned from a golden image. There the
+guest has never booted, so it writes its configuration to match whatever address
+KubeVirt assigns, and pinning one only creates a value you must never change.
 
 With `existingDataVolume` set, the operator does not create, resize, or delete
 the root disk. `onInstanceDeletion` is ignored for an adopted volume — an
@@ -468,8 +485,10 @@ created it still owns its lifecycle.
 
 Migration steps:
 
-1. Stop the PoC VM and confirm no VMI is running against the disk. Two VMs must
-   never attach the same `ReadWriteOnce` volume.
+1. Record the PoC VM's interface MAC address, then stop the VM and confirm no
+   VMI is running against the disk. Two VMs must never attach the same
+   `ReadWriteOnce` volume, and once the VM object is gone the address it used is
+   gone with it.
 2. Delete the PoC `VirtualMachine`, Service, Deployment, and Ingress. Leave the
    DataVolume and its PVC alone. Verify the PoC VM was not created with
    `dataVolumeTemplates`, which would delete the disk along with the VM.

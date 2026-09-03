@@ -49,19 +49,7 @@ func VM(instance *typeclawv1alpha1.TypeClawInstance) *unstructured.Unstructured 
 			"inputs": []any{
 				map[string]any{"name": "tablet", "type": "tablet", "bus": "usb"},
 			},
-			"interfaces": []any{
-				map[string]any{
-					"name":       "default",
-					"masquerade": map[string]any{},
-					"ports": []any{
-						map[string]any{
-							"name":     "desktop-agent",
-							"protocol": "TCP",
-							"port":     int64(GuestAgentPort),
-						},
-					},
-				},
-			},
+			"interfaces": []any{desktopInterface(spec)},
 		},
 		"machine":   map[string]any{"type": "q35"},
 		"resources": map[string]any{"requests": map[string]any{"memory": memory.String()}},
@@ -93,6 +81,32 @@ func VM(instance *typeclawv1alpha1.TypeClawInstance) *unstructured.Unstructured 
 // on a second virtio disk; Windows takes the virtio driver CD-ROM plus the
 // sysprep CD-ROM, because a stock Windows image cannot see a virtio root disk
 // until those drivers load.
+// desktopInterface renders the desktop's single pod interface. The Guest
+// Desktop Agent is reachable only through the declared masquerade port, so the
+// VM needs no other network surface.
+//
+// The MAC is pinned only when the spec asks for it. A guest that has already
+// booted persisted network configuration keyed to the address it saw then, so
+// an adopted disk that comes back on a KubeVirt-assigned address finds no
+// interface it recognizes and boots without networking.
+func desktopInterface(spec *typeclawv1alpha1.PersonalDesktopSpec) map[string]any {
+	iface := map[string]any{
+		"name":       "default",
+		"masquerade": map[string]any{},
+		"ports": []any{
+			map[string]any{
+				"name":     "desktop-agent",
+				"protocol": "TCP",
+				"port":     int64(GuestAgentPort),
+			},
+		},
+	}
+	if spec != nil && spec.MACAddress != "" {
+		iface["macAddress"] = spec.MACAddress
+	}
+	return iface
+}
+
 func diskDevices(spec *typeclawv1alpha1.PersonalDesktopSpec) []any {
 	disks := []any{
 		map[string]any{"name": "rootdisk", "disk": map[string]any{"bus": "virtio"}},

@@ -231,6 +231,20 @@ type PersonalDesktopSpec struct {
 	// +optional
 	Screen *PersonalDesktopScreenSpec `json:"screen,omitempty"`
 
+	// MACAddress pins the desktop interface's hardware address. Leave it unset
+	// for a desktop cloned from a golden image: KubeVirt then assigns one and
+	// the guest's first boot writes network configuration to match.
+	//
+	// It matters when adopting a root disk that has already booted. A Linux
+	// guest's persisted netplan matches its interface by MAC, so a disk that
+	// comes back attached to a different address finds no interface it
+	// recognizes and boots without networking. Set this to the address the
+	// disk was provisioned with, and treat it as immutable for that disk's
+	// lifetime.
+	// +kubebuilder:validation:Pattern=`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`
+	// +optional
+	MACAddress string `json:"macAddress,omitempty"`
+
 	// Linux holds Linux-only guest settings.
 	// +optional
 	Linux *PersonalDesktopLinuxSpec `json:"linux,omitempty"`
