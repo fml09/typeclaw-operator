@@ -1147,7 +1147,14 @@ export default definePlugin({
             observationId: z.string().uuid(),
             actions: desktopActionBatchSchema,
           }),
-          fileOperands: { nonFile: ["observationId", "actions"] },
+          // The runtime scanner matches nonFile operand paths exactly (dotted),
+          // recursing per object inside arrays: "actions" alone exempts only
+          // strings directly in the array, not actions[].text. Without
+          // "actions.text" any typed text carrying "/" fails closed as an
+          // ambiguous local file operand, and the file: URI workaround the
+          // error suggests gets pinned, rewritten to a snapshot path, and
+          // typed literally on the guest.
+          fileOperands: { nonFile: ["observationId", "actions", "actions.text"] },
           async execute({ observationId, actions }, toolCtx) {
             const config = requireConfig();
             return serializedWithControl(toolCtx.sessionId, toolCtx.signal, async (signal) => {

@@ -839,6 +839,25 @@ describe("typed guest agent actions", () => {
   });
 });
 
+describe("file operand declarations", () => {
+  test("declares typed text as non-file so shell commands are not misread as local paths", async () => {
+    const harness = await createPluginHarness();
+    try {
+      // The runtime scanner matches nonFile operand paths exactly, including
+      // per-object dotted paths inside arrays. Dropping "actions.text" made
+      // every slash-bearing typed text throw "ambiguous local file operand"
+      // and pushed the model into file: URIs, which the scanner pins, rewrites
+      // to a snapshot path, and the guest then types literally.
+      expect(
+        (harness.runtime.tools.desktop_act as DesktopTool & { fileOperands?: unknown })
+          .fileOperands,
+      ).toEqual({ nonFile: ["observationId", "actions", "actions.text"] });
+    } finally {
+      await harness.restore();
+    }
+  });
+});
+
 describe("plugin power quarantine", () => {
   test("transport loss blocks acquire and stop until an explicit start succeeds", async () => {
     let loseStopResponse = true;
