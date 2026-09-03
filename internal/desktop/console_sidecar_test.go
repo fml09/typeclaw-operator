@@ -237,3 +237,20 @@ func TestNoConsoleNetworkPolicyRuleInSidecarMode(t *testing.T) {
 		t.Fatal("without public egress the tailnet device never registers and the console never appears")
 	}
 }
+
+// TestGatewayPodSetsFSGroup: an emptyDir arrives owned by root, and the Gateway
+// Pod runs unprivileged. Without fsGroup the sidecar cannot write its state
+// directory, and tailscaled does not degrade -- it refuses to start, reporting
+// only "cannot start backend when state store is unhealthy". Observed on the
+// rollout after the TS_KUBE_SECRET fix, which is what made the state directory
+// load-bearing in the first place.
+func TestGatewayPodSetsFSGroup(t *testing.T) {
+	pod := GatewayDeployment(sidecarInstance(), "operator:test", "").Spec.Template.Spec
+	sc := pod.SecurityContext
+	if sc == nil || sc.FSGroup == nil {
+		t.Fatal("the Gateway Pod must set fsGroup or its emptyDir volumes are unwritable")
+	}
+	if sc.RunAsUser == nil || *sc.FSGroup != *sc.RunAsUser {
+		t.Fatalf("fsGroup %v does not match runAsUser %v", sc.FSGroup, sc.RunAsUser)
+	}
+}

@@ -136,9 +136,16 @@ func GatewayDeployment(instance *typeclawv1alpha1.TypeClawInstance, operatorImag
 					// the reason the Role above is resourceNames-scoped.
 					AutomountServiceAccountToken: &automount,
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot:   boolPtr(true),
-						RunAsUser:      int64Ptr(gatewayUID),
-						RunAsGroup:     int64Ptr(gatewayUID),
+						RunAsNonRoot: boolPtr(true),
+						RunAsUser:    int64Ptr(gatewayUID),
+						RunAsGroup:   int64Ptr(gatewayUID),
+						// Without this, an emptyDir arrives owned by root with
+						// mode 0755 and the unprivileged process cannot write
+						// it. That is not a theoretical papercut: tailscaled
+						// refuses to start at all on an unwritable state
+						// directory, reporting only "cannot start backend when
+						// state store is unhealthy".
+						FSGroup:        int64Ptr(gatewayUID),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 					Volumes:    gatewayVolumes(instance),
