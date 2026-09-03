@@ -16,6 +16,7 @@ import (
 	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
 	"github.com/fml09/typeclaw-operator/internal/controller"
 	"github.com/fml09/typeclaw-operator/internal/credential"
+	"github.com/fml09/typeclaw-operator/internal/resources"
 	"github.com/fml09/typeclaw-operator/internal/update"
 )
 
@@ -37,6 +38,7 @@ func main() {
 	var brokerPrivateKey string
 	var brokerClientCA string
 	var brokerTrustDomain string
+	var desktopGatewayImage string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address for the metrics endpoint")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "address for the health probes")
 	flag.StringVar(&brokerAddr, "credential-broker-bind-address", "", "mTLS address for the typed credential broker; empty disables it")
@@ -44,6 +46,7 @@ func main() {
 	flag.StringVar(&brokerPrivateKey, "credential-broker-private-key", "", "server private key for the typed credential broker")
 	flag.StringVar(&brokerClientCA, "credential-broker-client-ca", "", "client CA for SPIFFE mTLS authentication")
 	flag.StringVar(&brokerTrustDomain, "credential-broker-trust-domain", credential.RunnerSPIFFETrustDomain, "SPIFFE trust domain accepted by the broker")
+	flag.StringVar(&desktopGatewayImage, "desktop-gateway-image", resources.DefaultOperatorImage, "image the Desktop Gateway runs; the gateway binary ships in the operator image")
 	opts := zap.Options{Development: false}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -96,6 +99,16 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Backup")
+		os.Exit(1)
+	}
+	if err := (&controller.PersonalDesktopReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		// The Desktop Gateway binary ships in the operator image, so manager
+		// and gateway upgrade together unless an Instance pins an override.
+		OperatorImage: desktopGatewayImage,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "PersonalDesktop")
 		os.Exit(1)
 	}
 

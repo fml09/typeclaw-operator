@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Personal Desktop Windows answer file (Go text/template).
+
+  Fields: Username, Password, Width, Height, Hostname.
+
+  The operator renders this into the sysprep Secret, which KubeVirt attaches as
+  a CD-ROM next to setup.ps1, desktop_agent.py and agent-token. The golden
+  image is already installed and sysprepped, so only the specialize and
+  oobeSystem passes do work here; the windowsPE block only matters if an
+  administrator reuses the file for an unattended installation.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+  <settings pass="windowsPE">
+    <component name="Microsoft-Windows-International-Core-WinPE"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <SetupUILanguage>
+        <UILanguage>en-US</UILanguage>
+      </SetupUILanguage>
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+  </settings>
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <ComputerName>{{.Hostname}}</ComputerName>
+      <!-- The VM clock is UTC (KubeVirt clock utc), so the guest must agree or
+           every timestamp the desktop shows is offset. -->
+      <TimeZone>UTC</TimeZone>
+    </component>
+  </settings>
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>{{.Username}}</Name>
+            <DisplayName>{{.Username}}</DisplayName>
+            <Description>Personal Desktop interactive user</Description>
+            <!-- Administrators: setup.ps1 writes to ProgramData, changes power
+                 policy, opens a firewall port and registers a task. -->
+            <Group>Administrators</Group>
+            <Password>
+              <Value>{{.Password}}</Value>
+              <PlainText>true</PlainText>
+            </Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+      <AutoLogon>
+        <Username>{{.Username}}</Username>
+        <Enabled>true</Enabled>
+        <!-- LogonCount is decremented on every logon and autologon stops when
+             it reaches zero; the desktop must come back after every reboot for
+             the life of the VM. -->
+        <LogonCount>999999999</LogonCount>
+        <Password>
+          <Value>{{.Password}}</Value>
+          <PlainText>true</PlainText>
+        </Password>
+      </AutoLogon>
+      <Display>
+        <ColorDepth>32</ColorDepth>
+        <HorizontalResolution>{{.Width}}</HorizontalResolution>
+        <VerticalResolution>{{.Height}}</VerticalResolution>
+        <RefreshRate>60</RefreshRate>
+      </Display>
+      <OOBE>
+        <!-- Nobody is at the console on first boot: any screen that waits for
+             a click would stall the desktop before the agent ever starts. -->
+        <HideEULAPage>true</HideEULAPage>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <NetworkLocation>Work</NetworkLocation>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <!-- The sysprep CD-ROM drive letter is assigned by Windows and is not
+               known when this file is rendered, so the first drive that carries
+               setup.ps1 wins. -->
+          <CommandLine>powershell -ExecutionPolicy Bypass -NoProfile -Command "foreach ($d in 'D','E','F','G','H') { if (Test-Path \"$($d):\setup.ps1\") { &amp; \"$($d):\setup.ps1\"; break } }"</CommandLine>
+          <Description>Personal Desktop guest agent bootstrap</Description>
+          <RequiresUserInput>false</RequiresUserInput>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+    </component>
+  </settings>
+</unattend>

@@ -10,6 +10,58 @@ import (
 // fml09/typeclaw releases that publish the managed runtime image (ADR 0003).
 const DefaultRuntimeVersion = "0.48.9"
 
+// PersonalDesktopMinimumRuntimeVersion is the first managed runtime release
+// that honours TYPECLAW_PLATFORM_EXTENSIONS. An older runtime would mount the
+// computer-use Platform Extension and silently never load it, so the operator
+// refuses to provision instead of producing a desktop nothing can drive.
+const PersonalDesktopMinimumRuntimeVersion = "0.52.0"
+
+// PersonalDesktopDefaultVirtioContainerDisk carries the virtio-win drivers and
+// guest tools the Windows guest needs before it can see its own disk or NIC.
+const PersonalDesktopDefaultVirtioContainerDisk = "quay.io/kubevirt/virtio-container-disk:20260902_5d403aa64a"
+
+// PersonalDesktopDefaultPythonURL and PersonalDesktopDefaultPythonSHA256 pin
+// the interpreter the Windows first-logon script installs when the golden
+// image has none. The digest is verified in the guest before execution.
+const (
+	PersonalDesktopDefaultPythonURL    = "https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.exe"
+	PersonalDesktopDefaultPythonSHA256 = "edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403"
+)
+
+// ConditionPersonalDesktopReady reports that the Desktop Gateway is serving
+// and the desktop's root volume finished cloning.
+const ConditionPersonalDesktopReady = "PersonalDesktopReady"
+
+// Reasons carried by ConditionPersonalDesktopReady.
+const (
+	// PersonalDesktopReasonDisabled means the feature is off; the root disk
+	// and token Secret are deliberately retained.
+	PersonalDesktopReasonDisabled = "Disabled"
+	// PersonalDesktopReasonKubeVirtUnavailable means the cluster has no
+	// KubeVirt or CDI CRDs, so nothing can be provisioned here.
+	PersonalDesktopReasonKubeVirtUnavailable = "KubeVirtUnavailable"
+	// PersonalDesktopReasonRuntimeTooOld means the effective runtime release
+	// predates PersonalDesktopMinimumRuntimeVersion.
+	PersonalDesktopReasonRuntimeTooOld = "RuntimeTooOld"
+	// PersonalDesktopReasonProvisioning means the desktop objects are applied
+	// but the Gateway or the root volume has not converged yet.
+	PersonalDesktopReasonProvisioning = "Provisioning"
+	// PersonalDesktopReasonReady means the desktop is usable.
+	PersonalDesktopReasonReady = "Ready"
+	// PersonalDesktopReasonError means the declared desktop cannot be applied.
+	PersonalDesktopReasonError = "Error"
+)
+
+// Values of PersonalDesktopStatus.Phase.
+const (
+	PersonalDesktopPhaseDisabled     = "Disabled"
+	PersonalDesktopPhasePending      = "Pending"
+	PersonalDesktopPhaseProvisioning = "Provisioning"
+	PersonalDesktopPhaseReady        = "Ready"
+	PersonalDesktopPhaseDegraded     = "Degraded"
+	PersonalDesktopPhaseDeleting     = "Deleting"
+)
+
 // VolumeClaimSpec declares one durable volume backed by a PVC template.
 type VolumeClaimSpec struct {
 	// Requested capacity of the persistent volume.
@@ -128,6 +180,292 @@ type RuntimeSpec struct {
 	Timezone string `json:"timezone,omitempty"`
 }
 
+// PersonalDesktopSpec provisions one persistent KubeVirt desktop for the
+// Instance's single owner, a Desktop Gateway, and hydrates the computer-use
+// Platform Extension into the Managed Runtime.
+type PersonalDesktopSpec struct {
+	// Enabled turns the feature on. false (or the whole block absent) removes
+	// the VM, Gateway, console Ingress, and the extension mount, but keeps the
+	// root DataVolume and the token Secret so re-enabling resumes the same disk.
+	Enabled bool `json:"enabled"`
+
+	// OS selects the guest template. Linux (default) uses the Ubuntu/XFCE
+	// cloud-init template; Windows uses an administrator-built, sysprepped
+	// golden image plus an unattend answer file.
+	// +kubebuilder:validation:Enum=Linux;Windows
+	// +kubebuilder:default=Linux
+	OS string `json:"os,omitempty"`
+
+	// Namespace hosting the VM, DataVolumes, Gateway, agent Service, and
+	// console Ingress. Empty means the Instance namespace. KubeVirt relabels
+	// the VM's namespace to pod-security enforce=privileged, so administrators
+	// may prefer a dedicated namespace. Cross-namespace resources are cleaned
+	// up by a finalizer, not owner references.
+	Namespace string `json:"namespace,omitempty"`
+
+	// Owner is the single human allowed to open the Desktop Console and the
+	// identity the desktop is bound to.
+	Owner PersonalDesktopOwnerSpec `json:"owner"`
+
+	// Access declares how the Desktop Console is reached. Unset means the
+	// console is not exposed (agent path still works).
+	// +optional
+	Access *PersonalDesktopAccessSpec `json:"access,omitempty"`
+
+	// Image identifies the golden root image the desktop is cloned from.
+	Image PersonalDesktopImageSpec `json:"image"`
+
+	// RootVolume configures the per-desktop root disk.
+	// +optional
+	RootVolume PersonalDesktopRootVolumeSpec `json:"rootVolume,omitempty"`
+
+	// Resources sizes the VM.
+	// +optional
+	Resources PersonalDesktopResourcesSpec `json:"resources,omitempty"`
+
+	// NodeSelector pins the VM (KVM-capable nodes).
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Screen fixes the guest display geometry. Default 1280x800.
+	// +optional
+	Screen *PersonalDesktopScreenSpec `json:"screen,omitempty"`
+
+	// MACAddress pins the desktop interface's hardware address. Leave it unset
+	// for a desktop cloned from a golden image: KubeVirt then assigns one and
+	// the guest's first boot writes network configuration to match.
+	//
+	// It matters when adopting a root disk that has already booted. A Linux
+	// guest's persisted netplan matches its interface by MAC, so a disk that
+	// comes back attached to a different address finds no interface it
+	// recognizes and boots without networking. Set this to the address the
+	// disk was provisioned with, and treat it as immutable for that disk's
+	// lifetime.
+	// +kubebuilder:validation:Pattern=`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`
+	// +optional
+	MACAddress string `json:"macAddress,omitempty"`
+
+	// Linux holds Linux-only guest settings.
+	// +optional
+	Linux *PersonalDesktopLinuxSpec `json:"linux,omitempty"`
+
+	// Windows holds Windows-only guest settings. Required when os=Windows.
+	// +optional
+	Windows *PersonalDesktopWindowsSpec `json:"windows,omitempty"`
+
+	// Gateway overrides Desktop Gateway defaults.
+	// +optional
+	Gateway *PersonalDesktopGatewaySpec `json:"gateway,omitempty"`
+}
+
+// PersonalDesktopOwnerSpec names the one human bound to the desktop.
+type PersonalDesktopOwnerSpec struct {
+	// Issuer names the identity provider. Default https://login.tailscale.com
+	// (the only provider the console supports in v1).
+	// +kubebuilder:default="https://login.tailscale.com"
+	Issuer string `json:"issuer,omitempty"`
+
+	// Subject is the stable identifier the console compares against the
+	// identity the access provider asserts. For Tailscale it is the login name
+	// Tailscale sends as Tailscale-User-Login (for example alice@example.com).
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	Subject string `json:"subject"`
+}
+
+// PersonalDesktopAccessSpec declares how the Desktop Console is published.
+type PersonalDesktopAccessSpec struct {
+	// Tailscale publishes the console through the Tailscale Kubernetes
+	// operator (an Ingress with ingressClassName tailscale). Identity comes
+	// from the Tailscale-User-Login header the operator proxy injects and
+	// overwrites.
+	// +optional
+	Tailscale *PersonalDesktopTailscaleAccessSpec `json:"tailscale,omitempty"`
+}
+
+// PersonalDesktopTailscaleAccessSpec configures the tailnet-published console.
+type PersonalDesktopTailscaleAccessSpec struct {
+	// Hostname is the MagicDNS label (served as <hostname>.<tailnet>.ts.net).
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Hostname string `json:"hostname"`
+
+	// Tags are applied to the proxy device via the tailscale.com/tags
+	// annotation (for example tag:typeclaw-desktop). Access is then granted
+	// with tailnet policy grants to that tag.
+	// +optional
+	Tags []string `json:"tags,omitempty"`
+
+	// OperatorNamespace is where Tailscale proxy Pods run; the console port is
+	// only reachable from that namespace. Default "tailscale".
+	// +kubebuilder:default=tailscale
+	OperatorNamespace string `json:"operatorNamespace,omitempty"`
+
+	// AllowedLogins optionally widens console access beyond owner.subject.
+	// Every entry is an exact Tailscale login name.
+	// +optional
+	AllowedLogins []string `json:"allowedLogins,omitempty"`
+}
+
+// PersonalDesktopImageSpec identifies the sealed golden root image.
+type PersonalDesktopImageSpec struct {
+	// GoldenDataVolume names the sealed golden root DataVolume (in the desktop
+	// namespace) the root disk is cloned from. The operator never deletes it.
+	// +kubebuilder:validation:MinLength=1
+	GoldenDataVolume string `json:"goldenDataVolume"`
+
+	// Import creates GoldenDataVolume from an HTTP source when it does not
+	// exist yet (Linux cloud images). Windows golden images are built by an
+	// administrator and are never imported here.
+	// +optional
+	Import *PersonalDesktopImageImportSpec `json:"import,omitempty"`
+}
+
+// PersonalDesktopImageImportSpec describes a CDI HTTP import of the golden
+// image.
+type PersonalDesktopImageImportSpec struct {
+	// URL of the cloud image. HTTPS only.
+	URL string `json:"url"`
+
+	// Checksum in CDI form, for example sha256:<hex>. An unverified import
+	// would make the desktop's whole root filesystem attacker-controlled.
+	Checksum string `json:"checksum"`
+
+	// Size of the imported golden volume.
+	// +kubebuilder:default="32Gi"
+	Size resource.Quantity `json:"size,omitempty"`
+
+	// StorageClassName to request. Unset means the cluster default class.
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
+}
+
+// PersonalDesktopRootVolumeSpec configures the per-desktop root disk.
+type PersonalDesktopRootVolumeSpec struct {
+	// Size of the cloned root disk.
+	// +kubebuilder:default="32Gi"
+	Size resource.Quantity `json:"size,omitempty"`
+
+	// StorageClassName to request. Unset means the cluster default class.
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
+
+	// ExistingDataVolume adopts an already provisioned root DataVolume (for
+	// example a disk created by the earlier PoC). When set, the operator does
+	// not create, resize, or delete the root disk.
+	// +optional
+	ExistingDataVolume string `json:"existingDataVolume,omitempty"`
+
+	// OnInstanceDeletion: Retain (default) keeps the root disk when the
+	// TypeClawInstance is deleted; Delete removes it. Never applied to an
+	// adopted ExistingDataVolume.
+	// +kubebuilder:validation:Enum=Retain;Delete
+	// +kubebuilder:default=Retain
+	OnInstanceDeletion string `json:"onInstanceDeletion,omitempty"`
+}
+
+// PersonalDesktopResourcesSpec sizes the desktop virtual machine.
+type PersonalDesktopResourcesSpec struct {
+	// CPUCores exposed to the guest.
+	// +kubebuilder:default=2
+	CPUCores int32 `json:"cpuCores,omitempty"`
+
+	// Memory requested for the guest.
+	// +kubebuilder:default="4Gi"
+	Memory resource.Quantity `json:"memory,omitempty"`
+}
+
+// PersonalDesktopScreenSpec fixes the guest display geometry. The geometry is
+// fixed rather than negotiated because the model reasons about pixel
+// coordinates: a resolution that changes between screenshot and click would
+// silently move the target.
+type PersonalDesktopScreenSpec struct {
+	// +kubebuilder:default=1280
+	Width int32 `json:"width,omitempty"`
+	// +kubebuilder:default=800
+	Height int32 `json:"height,omitempty"`
+}
+
+// PersonalDesktopLinuxSpec holds Linux-only guest settings.
+type PersonalDesktopLinuxSpec struct {
+	// Username of the autologin desktop user.
+	// +kubebuilder:default=desktop
+	Username string `json:"username,omitempty"`
+
+	// SSHAuthorizedKeys are optional test/maintenance keys for that user.
+	// +optional
+	SSHAuthorizedKeys []string `json:"sshAuthorizedKeys,omitempty"`
+}
+
+// PersonalDesktopWindowsSpec holds Windows-only guest settings.
+type PersonalDesktopWindowsSpec struct {
+	// Username of the interactive automation user created by the answer file.
+	// +kubebuilder:default=desktop
+	Username string `json:"username,omitempty"`
+
+	// VirtioContainerDisk is the virtio-win driver/guest-tools containerDisk
+	// attached as a CD-ROM.
+	// +kubebuilder:default="quay.io/kubevirt/virtio-container-disk:20260902_5d403aa64a"
+	VirtioContainerDisk string `json:"virtioContainerDisk,omitempty"`
+
+	// PythonInstaller is downloaded by the first-logon setup script when the
+	// golden image has no Python 3. Unset means the tracked python.org
+	// release in PersonalDesktopDefaultPythonURL.
+	// +optional
+	PythonInstaller *PersonalDesktopWindowsInstallerSpec `json:"pythonInstaller,omitempty"`
+}
+
+// PersonalDesktopWindowsInstallerSpec pins one guest-side installer download.
+type PersonalDesktopWindowsInstallerSpec struct {
+	// URL of the installer. HTTPS only.
+	URL string `json:"url"`
+
+	// SHA256 the guest verifies before running the installer.
+	SHA256 string `json:"sha256"`
+}
+
+// PersonalDesktopGatewaySpec overrides Desktop Gateway defaults.
+type PersonalDesktopGatewaySpec struct {
+	// Image overrides the Desktop Gateway image. Default is the operator image
+	// (the gateway binary ships in it).
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// AgentLeaseTTLSeconds is the idle TTL of the agent input lease.
+	// +kubebuilder:default=120
+	AgentLeaseTTLSeconds int32 `json:"agentLeaseTTLSeconds,omitempty"`
+}
+
+// PersonalDesktopStatus reports the observed state of one Personal Desktop.
+type PersonalDesktopStatus struct {
+	// Phase is Disabled, Pending, Provisioning, Ready, Degraded, or Deleting.
+	Phase string `json:"phase,omitempty"`
+
+	// DesktopName is the VirtualMachine name.
+	DesktopName string `json:"desktopName,omitempty"`
+
+	// Namespace hosting the desktop objects.
+	Namespace string `json:"namespace,omitempty"`
+
+	// GoldenImagePhase mirrors the golden DataVolume's CDI phase.
+	GoldenImagePhase string `json:"goldenImagePhase,omitempty"`
+
+	// RootVolumePhase mirrors the root DataVolume's CDI phase.
+	RootVolumePhase string `json:"rootVolumePhase,omitempty"`
+
+	// VMPrintableStatus mirrors the VirtualMachine's printable status.
+	VMPrintableStatus string `json:"vmPrintableStatus,omitempty"`
+
+	// GatewayReady reports whether the Desktop Gateway has a ready replica.
+	GatewayReady bool `json:"gatewayReady,omitempty"`
+
+	// ConsoleURL is the published Desktop Console address, taken from the
+	// console Ingress load-balancer status.
+	ConsoleURL string `json:"consoleURL,omitempty"`
+
+	// Message carries human-readable provisioning context.
+	Message string `json:"message,omitempty"`
+}
+
 // TypeClawInstanceSpec declares the operational policy the operator enforces
 // for one TypeClaw Instance. Runtime-owned non-credential state (sessions,
 // Git history, and memory) lives in the Agent Folder; Opaque Credential Use is
@@ -187,6 +525,11 @@ type TypeClawInstanceSpec struct {
 	// reference or a Secret projection.
 	// +optional
 	CredentialPolicy *CredentialPolicySpec `json:"credentialPolicy,omitempty"`
+
+	// PersonalDesktop provisions the Instance owner's persistent KubeVirt
+	// desktop and the computer-use Platform Extension. Unset means no desktop.
+	// +optional
+	PersonalDesktop *PersonalDesktopSpec `json:"personalDesktop,omitempty"`
 }
 
 // SecuritySpec declares workload security-envelope selections. Anything
@@ -237,6 +580,10 @@ type TypeClawInstanceStatus struct {
 	// projects it into the SelfConfigCompliant condition.
 	// +optional
 	SelfConfig *SelfConfigStatus `json:"selfConfig,omitempty"`
+
+	// PersonalDesktop reports the observed Personal Desktop state.
+	// +optional
+	PersonalDesktop *PersonalDesktopStatus `json:"personalDesktop,omitempty"`
 }
 
 // SelfConfigSpec declares the platform policy for agent-authored config.
@@ -325,6 +672,7 @@ type UpdateStatus struct {
 // +kubebuilder:printcolumn:name="Suspended",type="boolean",JSONPath=`.spec.suspend`
 // +kubebuilder:printcolumn:name="Runtime",type="string",JSONPath=`.spec.runtime.version`
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="RuntimeReady")].status`
+// +kubebuilder:printcolumn:name="Desktop",type="string",JSONPath=`.status.personalDesktop.phase`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=`.metadata.creationTimestamp`
 
 // TypeClawInstance manages one isolated TypeClaw agent: an independently

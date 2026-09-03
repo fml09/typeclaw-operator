@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Personal Desktop</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0c0e11;
+      --panel: #14181c;
+      --panel-2: #1b2026;
+      --line: #2a323a;
+      --text: #e9eef2;
+      --muted: #93a1ad;
+      --accent: #3fb98f;
+      --accent-dim: #174f3d;
+      --danger: #ff8f84;
+      --warn: #ffce6a;
+      font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; }
+    .app { display: flex; flex-direction: column; min-height: 100vh; }
+
+    .topbar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+    }
+    .brand { display: flex; align-items: baseline; gap: 10px; margin-right: auto; min-width: 0; }
+    .brand h1 { margin: 0; font-size: 16px; letter-spacing: .2px; white-space: nowrap; }
+    .brand .name { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
+      background: var(--panel-2); font-size: 12px; white-space: nowrap;
+    }
+    .chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+    .chip[data-tone="good"]::before { background: var(--accent); }
+    .chip[data-tone="warn"]::before { background: var(--warn); }
+    .chip[data-tone="bad"]::before { background: var(--danger); }
+    .chip[data-tone="good"] { border-color: var(--accent-dim); }
+    .badge {
+      padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+      background: #40170f; color: var(--danger); border: 1px solid #6d2a1d;
+    }
+    .os { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+    #identity { font-size: 12px; color: var(--muted); }
+
+    .notice {
+      margin: 12px 16px 0; padding: 10px 12px; border-radius: 8px;
+      border: 1px solid #6d5320; background: #241d11; color: var(--warn); font-size: 13px;
+    }
+
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 14px; padding: 14px 16px 16px; flex: 1; }
+    .stage {
+      position: relative; display: grid; place-items: center; min-height: 60vh; overflow: hidden;
+      background: #05070a; border: 1px solid var(--line); border-radius: 12px;
+    }
+    .screen { display: grid; place-items: center; width: 100%; height: 100%; overflow: auto; }
+    .screen[data-fit="false"] { place-items: start; }
+    #fallback { display: block; max-width: 100%; max-height: 78vh; }
+    .screen[data-fit="false"] #fallback { max-width: none; max-height: none; }
+    #screen canvas { max-width: 100%; }
+    .stage[data-controlling="true"] { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+    .watermark {
+      position: absolute; left: 12px; bottom: 12px; pointer-events: none;
+      padding: 3px 9px; border-radius: 6px; font-size: 11px; letter-spacing: .1em;
+      text-transform: uppercase; color: #b9c6d1; background: rgba(10, 14, 18, .62); border: 1px solid var(--line);
+    }
+    .empty {
+      position: absolute; inset: 0; display: grid; place-content: center; gap: 10px;
+      justify-items: center; text-align: center; padding: 24px; cursor: pointer; color: var(--muted);
+    }
+    .empty strong { color: var(--text); font-size: 17px; }
+    .stage-tools { position: absolute; right: 10px; top: 10px; display: flex; gap: 6px; }
+    .stage-tools button { min-height: 32px; padding: 0 10px; font-size: 12px; }
+
+    aside {
+      display: flex; flex-direction: column; gap: 14px; padding: 14px;
+      border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+      max-height: calc(100vh - 90px); overflow: auto;
+    }
+    aside h2 { margin: 0 0 6px; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+    .group { display: flex; flex-wrap: wrap; gap: 6px; }
+    button {
+      min-height: 38px; padding: 0 12px; border: 1px solid #3b454e; border-radius: 8px;
+      background: var(--panel-2); color: inherit; font: inherit; font-size: 14px; cursor: pointer;
+    }
+    button:hover:not(:disabled) { border-color: #55636f; }
+    button.primary { background: var(--accent-dim); border-color: #2a7a5f; }
+    button.danger { color: var(--danger); }
+    button:disabled { opacity: .4; cursor: not-allowed; }
+    textarea {
+      width: 100%; min-height: 60px; padding: 8px; resize: vertical;
+      border: 1px solid #3b454e; border-radius: 8px; background: #0b0e11; color: inherit; font: inherit;
+    }
+    pre, .log {
+      margin: 0; padding: 10px; border-radius: 8px; background: #080a0d; border: 1px solid var(--line);
+      font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap; word-break: break-word; overflow: auto;
+    }
+    #status { max-height: 260px; }
+    .log { max-height: 190px; color: var(--muted); }
+    details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    small { color: var(--muted); font-size: 12px; }
+    .panel-toggle { display: none; }
+
+    #toast {
+      position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+      max-width: min(680px, calc(100% - 32px)); padding: 10px 14px; cursor: pointer;
+      border: 1px solid #6d2a1d; border-radius: 10px; background: #2a1310; color: #ffd9d3;
+      font-size: 13px; box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+    }
+
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: minmax(0, 1fr); }
+      .stage { min-height: 42vh; }
+      .panel-toggle { display: inline-flex; }
+      aside { max-height: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <h1>Personal Desktop</h1>
+        <span class="name" id="desktop-name">…</span>
+        <span class="os" id="os-badge"></span>
+      </div>
+      <span class="chip" id="chip-connection" data-tone="idle">Disconnected</span>
+      <span class="chip" id="chip-power" data-tone="idle">Unknown</span>
+      <span class="chip" id="chip-controller" data-tone="idle">Nobody</span>
+      <span class="badge" id="badge-recovery" hidden>Recovery required</span>
+      <span id="identity"></span>
+      <button class="panel-toggle" id="panel-toggle">Panel</button>
+    </header>
+
+    <p id="dev-warning" class="notice" hidden>
+      <strong>Development access.</strong> This console is authenticated by a local development token. Never expose this listener beyond loopback.
+    </p>
+
+    <main class="layout">
+      <section class="stage" id="stage" data-controlling="false">
+        <div id="screen" class="screen" data-fit="true"><img id="fallback" alt="View-only screen of the Personal Desktop"></div>
+        <div class="watermark" id="watermark" hidden>View only</div>
+        <div class="empty" id="empty">
+          <strong>The screen is not being shown</strong>
+          <span>Start the live view to poll screenshots, or take control for an interactive session.</span>
+        </div>
+        <div class="stage-tools">
+          <button id="fit">Fit: on</button>
+          <button id="fullscreen">Fullscreen</button>
+        </div>
+      </section>
+
+      <aside id="panel">
+        <section>
+          <h2>Power</h2>
+          <div class="group">
+            <button id="start" class="primary">Start</button>
+            <button id="stop" class="danger">Shut down</button>
+            <button id="refresh">Refresh</button>
+          </div>
+        </section>
+        <section>
+          <h2>Control</h2>
+          <div class="group">
+            <button id="view">Live view</button>
+            <button id="control" class="primary">Take control</button>
+            <button id="takeover" class="danger">Take control from agent</button>
+            <button id="release">Hand back</button>
+          </div>
+          <p><small>Live view polls screenshots and sends no input. Taking control opens the exclusive input session; only one controller exists at a time.</small></p>
+        </section>
+        <section>
+          <h2>Keyboard</h2>
+          <div class="group">
+            <button id="cad">Ctrl+Alt+Del</button>
+            <button id="esc">Esc</button>
+          </div>
+          <p><textarea id="paste-text" placeholder="Text to send to the desktop clipboard"></textarea></p>
+          <div class="group"><button id="paste">Paste text</button></div>
+        </section>
+        <section>
+          <details id="status-details">
+            <summary>Status details</summary>
+            <pre id="status">Loading…</pre>
+          </details>
+        </section>
+        <section>
+          <h2>Activity</h2>
+          <div class="log" id="log"></div>
+        </section>
+      </aside>
+    </main>
+
+    <div id="toast" hidden></div>
+  </div>
+
+  <script type="module">
+    // The console forwards only the development token; every other identity
+    // fact is established by the Gateway from the access provider's headers.
+    const query = new URLSearchParams(location.search);
+    const identityQuery = new URLSearchParams();
+    if (query.has('devToken')) identityQuery.set('devToken', query.get('devToken'));
+    const suffix = identityQuery.size ? `?${identityQuery}` : '';
+
+    const status = document.querySelector('#status');
+    const image = document.querySelector('#fallback');
+    const screen = document.querySelector('#screen');
+    const stage = document.querySelector('#stage');
+    const empty = document.querySelector('#empty');
+    const watermark = document.querySelector('#watermark');
+    const startButton = document.querySelector('#start');
+    const stopButton = document.querySelector('#stop');
+    const controlButton = document.querySelector('#control');
+    const takeoverButton = document.querySelector('#takeover');
+    const releaseButton = document.querySelector('#release');
+    const viewButton = document.querySelector('#view');
+    const cadButton = document.querySelector('#cad');
+    const escButton = document.querySelector('#esc');
+    const pasteButton = document.querySelector('#paste');
+    const pasteText = document.querySelector('#paste-text');
+    const fitButton = document.querySelector('#fit');
+    const toastElement = document.querySelector('#toast');
+    const logElement = document.querySelector('#log');
+    const identityElement = document.querySelector('#identity');
+    const nameElement = document.querySelector('#desktop-name');
+    const osElement = document.querySelector('#os-badge');
+    const connectionChip = document.querySelector('#chip-connection');
+    const powerChip = document.querySelector('#chip-power');
+    const controllerChip = document.querySelector('#chip-controller');
+    const recoveryBadge = document.querySelector('#badge-recovery');
+
+    let pollTimer;
+    let snapshotController;
+    let viewEpoch = 0;
+    let viewFailures = 0;
+    let rfb;
+    let controlEpoch = 0;
+    let powerUncertain;
+    let gatewayControlBlocked = false;
+    let lastStatus;
+    let toastTimer;
+    let fitToWindow = true;
+    const logLines = [];
+    screen.dataset.controlConnected = 'false';
+
+    if (identityQuery.size) document.querySelector('#dev-warning').hidden = false;
+
+    class GatewayAPIError extends Error {
+      constructor(statusCode, details) {
+        super(String(details.detail || details.error || `Gateway HTTP ${statusCode}`));
+        this.name = 'GatewayAPIError';
+        this.statusCode = statusCode;
+        this.details = details;
+      }
+    }
+
+    async function api(path, options) {
+      const join = path.includes('?') ? '&' : '?';
+      const url = identityQuery.size ? `${path}${join}${identityQuery}` : path;
+      const response = await fetch(url, options);
+      const type = response.headers.get('content-type') || '';
+      const body = type.includes('json') ? await response.json() : await response.text();
+      if (!response.ok) {
+        const details = body && typeof body === 'object'
+          ? body
+          : { detail: String(body || response.statusText) };
+        throw new GatewayAPIError(response.status, details);
+      }
+      return body;
+    }
+
+    function logEvent(message) {
+      const stamp = new Date().toISOString().slice(11, 19);
+      logLines.push(`${stamp}  ${message}`);
+      while (logLines.length > 20) logLines.shift();
+      logElement.textContent = logLines.join('\n');
+    }
+
+    function dismissToast() {
+      clearTimeout(toastTimer);
+      toastTimer = undefined;
+      toastElement.hidden = true;
+    }
+
+    // Toasts summarize; the verbatim body always stays in Status details, so
+    // nothing the Gateway reported is lost by the summary.
+    function toast(message) {
+      toastElement.textContent = message;
+      toastElement.hidden = false;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(dismissToast, 6000);
+      logEvent(message);
+    }
+
+    function chip(element, label, tone) {
+      element.textContent = label;
+      element.dataset.tone = tone;
+    }
+
+    function applyPowerPolicy() {
+      const blocked = Boolean(powerUncertain) || gatewayControlBlocked;
+      stopButton.disabled = blocked;
+      controlButton.disabled = blocked;
+      takeoverButton.disabled = blocked;
+      startButton.textContent = blocked ? 'Start / recover' : 'Start';
+      recoveryBadge.hidden = !blocked;
+    }
+
+    function applyControlPolicy() {
+      const controlling = Boolean(rfb);
+      cadButton.disabled = !controlling;
+      escButton.disabled = !controlling;
+      pasteButton.disabled = !controlling;
+      releaseButton.disabled = !controlling && !pollTimer;
+      stage.dataset.controlling = controlling ? 'true' : 'false';
+      watermark.hidden = controlling || !pollTimer;
+      empty.hidden = controlling || Boolean(pollTimer);
+      chip(
+        connectionChip,
+        controlling ? 'Controlling' : pollTimer ? 'Viewing' : 'Disconnected',
+        controlling ? 'good' : pollTimer ? 'warn' : 'idle',
+      );
+    }
+
+    function renderChips(gatewayStatus) {
+      if (!gatewayStatus) return;
+      nameElement.textContent = gatewayStatus.desktopName || '';
+      osElement.textContent = gatewayStatus.os || '';
+      identityElement.textContent = gatewayStatus.login
+        ? `${gatewayStatus.login} · ${gatewayStatus.authMode}`
+        : gatewayStatus.authMode || '';
+
+      const power = gatewayStatus.vmExists === false ? 'Absent' : (gatewayStatus.vmPrintableStatus || 'Unknown');
+      chip(powerChip, power, power === 'Running' ? 'good' : power === 'Stopped' ? 'idle' : 'warn');
+
+      const actor = gatewayStatus.controlActive ? gatewayStatus.controlActor : undefined;
+      chip(
+        controllerChip,
+        actor === 'agent' ? 'Agent' : actor === 'human' ? 'You' : 'Nobody',
+        actor === 'agent' ? 'warn' : actor === 'human' ? 'good' : 'idle',
+      );
+    }
+
+    function statusDocument(gatewayStatus) {
+      return powerUncertain
+        ? { powerRecoveryRequired: powerUncertain, gateway: gatewayStatus }
+        : gatewayStatus;
+    }
+
+    async function refresh() {
+      try {
+        const gatewayStatus = await api('/api/me');
+        lastStatus = gatewayStatus;
+        gatewayControlBlocked = gatewayStatus.controlBlocked === true;
+        applyPowerPolicy();
+        applyControlPolicy();
+        renderChips(gatewayStatus);
+        status.textContent = JSON.stringify(statusDocument(gatewayStatus), null, 2);
+      } catch (error) {
+        status.textContent = `Error: ${error.message}`;
+        toast(`Status unavailable: ${error.message}`);
+      }
+    }
+
+    // A power failure is only safe to retry when the Gateway proves the
+    // operation did not run. The structured outcome decides that; the HTTP
+    // status is a fallback for responses an intermediary produced.
+    function powerFailure(action, error) {
+      const details = error instanceof GatewayAPIError ? error.details : {};
+      const rejected = details.outcome === 'Rejected';
+      const ambiguous = !rejected && (
+        !(error instanceof GatewayAPIError)
+        || error.statusCode >= 500
+        || [408, 425, 429].includes(error.statusCode)
+        || details.outcome === 'UnknownOutcome'
+      );
+      if (details.controlBlocked === true) {
+        gatewayControlBlocked = true;
+        applyPowerPolicy();
+      }
+      if (!ambiguous) {
+        status.textContent = JSON.stringify(statusDocument({
+          action,
+          ...details,
+          message: error.message,
+        }), null, 2);
+        toast(`${action} rejected: ${error.message}`);
+        return;
+      }
+      powerUncertain = {
+        ...details,
+        action,
+        outcome: 'UnknownOutcome',
+        retrySafe: false,
+        controlBlocked: details.controlBlocked ?? 'unknown',
+        message: error.message,
+      };
+      applyPowerPolicy();
+      status.textContent = JSON.stringify(statusDocument(null), null, 2);
+      toast(`${action} outcome unknown; control stays blocked until a start succeeds`);
+    }
+
+    async function power(action) {
+      if ((powerUncertain || gatewayControlBlocked) && action !== 'start') return;
+      try {
+        const result = await api(`/api/power/${action}`, { method: 'POST' });
+        if (action === 'start') {
+          powerUncertain = undefined;
+          gatewayControlBlocked = false;
+        }
+        applyPowerPolicy();
+        logEvent(`${action} accepted${result && result.idempotent ? ' (already in that state)' : ''}`);
+        await refresh();
+        return result;
+      } catch (error) {
+        powerFailure(action, error);
+      }
+    }
+
+    function stopViewing() {
+      viewEpoch += 1;
+      clearTimeout(pollTimer);
+      pollTimer = undefined;
+      snapshotController?.abort();
+      snapshotController = undefined;
+      if (image.src.startsWith('blob:')) URL.revokeObjectURL(image.src);
+    }
+
+    async function snapshot(epoch, signal) {
+      const response = await fetch(`/api/screenshot${suffix}`, { cache: 'no-store', signal });
+      if (!response.ok) throw new Error((await response.json()).detail || response.statusText);
+      const blob = await response.blob();
+      if (epoch !== viewEpoch || signal.aborted || rfb) return;
+      const next = URL.createObjectURL(blob);
+      const previous = image.src;
+      image.src = next;
+      if (previous.startsWith('blob:')) URL.revokeObjectURL(previous);
+    }
+
+    async function pollView(epoch) {
+      if (document.hidden === true) {
+        pollTimer = setTimeout(() => pollView(epoch), 5000);
+        return;
+      }
+      const controller = new AbortController();
+      snapshotController = controller;
+      try {
+        await snapshot(epoch, controller.signal);
+        viewFailures = 0;
+      } catch (error) {
+        if (error.name !== 'AbortError' && epoch === viewEpoch) {
+          viewFailures = Math.min(viewFailures + 1, 5);
+          toast(`Screen unavailable: ${error.message}`);
+        }
+      } finally {
+        if (snapshotController === controller) snapshotController = undefined;
+      }
+      if (epoch !== viewEpoch || controller.signal.aborted || rfb) return;
+      // Back off on failure and jitter every delay, so a desktop that is down
+      // is not polled by every open console at the same instant.
+      const baseDelay = viewFailures ? Math.min(15000, 1500 * (2 ** viewFailures)) : 1500;
+      const jitteredDelay = Math.round(baseDelay * (0.85 + Math.random() * 0.3));
+      pollTimer = setTimeout(() => pollView(epoch), jitteredDelay);
+    }
+
+    async function startViewing() {
+      stopControl();
+      stopViewing();
+      viewFailures = 0;
+      screen.replaceChildren(image);
+      const epoch = viewEpoch;
+      pollTimer = setTimeout(() => pollView(epoch), 0);
+      applyControlPolicy();
+      logEvent('live view started');
+    }
+
+    async function startControl(takeover = false) {
+      stopViewing();
+      stopControl();
+      const epoch = controlEpoch;
+      screen.replaceChildren();
+      const module = await import('/novnc/core/rfb.js');
+      if (epoch !== controlEpoch) return;
+      const RFB = module.default;
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const params = new URLSearchParams(identityQuery);
+      if (takeover) params.set('takeover', '1');
+      const target = `${protocol}//${location.host}/api/vnc?${params}`;
+      const connection = new RFB(screen, target, { wsProtocols: ['binary'] });
+      rfb = connection;
+      connection.scaleViewport = fitToWindow;
+      connection.resizeSession = false;
+      connection.addEventListener('connect', () => {
+        if (rfb !== connection) {
+          connection.disconnect();
+          return;
+        }
+        screen.dataset.controlConnected = 'true';
+        applyControlPolicy();
+        logEvent(takeover ? 'control taken over from the agent' : 'control connected');
+        refresh();
+      });
+      connection.addEventListener('disconnect', event => {
+        if (rfb !== connection) return;
+        rfb = undefined;
+        screen.dataset.controlConnected = 'false';
+        screen.replaceChildren(image);
+        applyControlPolicy();
+        logEvent(`control ended: ${event.detail.clean ? 'clean' : 'connection lost / outcome unknown'}`);
+        if (!event.detail.clean) toast('Control connection lost; the outcome of the last input is unknown');
+        refresh();
+      });
+      connection.addEventListener('securityfailure', event => {
+        if (rfb !== connection) return;
+        toast(`VNC security failure: ${event.detail.reason}`);
+      });
+      applyControlPolicy();
+    }
+
+    function stopControl() {
+      controlEpoch += 1;
+      const connection = rfb;
+      rfb = undefined;
+      screen.dataset.controlConnected = 'false';
+      if (connection) connection.disconnect();
+      screen.replaceChildren(image);
+      applyControlPolicy();
+    }
+
+    function setFit(next) {
+      fitToWindow = next;
+      screen.dataset.fit = next ? 'true' : 'false';
+      fitButton.textContent = next ? 'Fit: on' : 'Fit: off';
+      if (rfb) rfb.scaleViewport = next;
+    }
+
+    document.querySelector('#refresh').onclick = refresh;
+    viewButton.onclick = startViewing;
+    empty.onclick = startViewing;
+    controlButton.onclick = () => startControl(false).catch(error => toast(`Control failed: ${error.message}`));
+    takeoverButton.onclick = () => startControl(true).catch(error => toast(`Takeover failed: ${error.message}`));
+    releaseButton.onclick = () => { stopControl(); startViewing(); };
+    startButton.onclick = () => power('start');
+    stopButton.onclick = () => power('stop');
+    fitButton.onclick = () => setFit(!fitToWindow);
+    toastElement.onclick = dismissToast;
+    document.querySelector('#fullscreen').onclick = () => stage.requestFullscreen?.();
+    document.querySelector('#panel-toggle').onclick = () => {
+      const panel = document.querySelector('#panel');
+      panel.hidden = !panel.hidden;
+    };
+    cadButton.onclick = () => rfb?.sendCtrlAltDel?.();
+    escButton.onclick = () => rfb?.sendKey?.(0xff1b, 'Escape');
+    pasteButton.onclick = () => rfb?.clipboardPasteFrom?.(pasteText.value || '');
+
+    addEventListener('beforeunload', () => { stopViewing(); stopControl(); });
+    document.addEventListener?.('visibilitychange', () => {
+      if (document.hidden !== false || rfb || !pollTimer) return;
+      clearTimeout(pollTimer);
+      pollTimer = setTimeout(() => pollView(viewEpoch), 0);
+    });
+    // Esc inside the canvas belongs to the guest; only a press from elsewhere
+    // on the page means "give the desktop back".
+    document.addEventListener?.('keydown', event => {
+      if (event.key !== 'Escape' || !rfb) return;
+      if (event.target && event.target.tagName === 'CANVAS') return;
+      stopControl();
+      startViewing();
+    });
+
+    applyPowerPolicy();
+    applyControlPolicy();
+    refresh();
+  </script>
+</body>
+</html>

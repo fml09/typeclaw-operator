@@ -11,6 +11,11 @@ all: generate manifests fmt build test
 .PHONY: manifests
 manifests: ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=typeclaw-operator-manager-role $(CRD_OPTIONS) webhook paths=./api/... paths=./internal/... output:crd:artifacts:config=config/crd/bases output:rbac:artifacts:config=config/rbac
+	# Argo CD renders the chart with `helm template`, which includes crds/, so
+	# the chart's copy is what actually reaches the cluster. Leaving it to be
+	# updated by hand means a new API field is silently stripped by the API
+	# server, with no error anywhere. Copy it here so the two cannot drift.
+	cp config/crd/bases/*.yaml charts/typeclaw-operator/crds/
 
 .PHONY: generate
 generate: ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -32,6 +37,25 @@ build:
 .PHONY: test
 test:
 	go test ./... -coverprofile=cover.out
+
+## The Personal Desktop feature spans three toolchains. Each gate runs on its
+## own because they fail for unrelated reasons: a Python guest regression says
+## nothing about the TypeScript extension, and CI should report them apart.
+
+.PHONY: test-guest
+test-guest: ## Run the Guest Desktop Agent test suite (hermetic; no X11 needed).
+	cd guest/desktop-agent && python3 -m unittest discover -v
+
+.PHONY: test-extension
+test-extension: ## Type-check and test the computer-use Platform Extension.
+	cd extensions/personal-desktop-computer-use && bun install --frozen-lockfile && bunx tsc --noEmit && bun test
+
+.PHONY: test-console
+test-console: ## Run the Desktop Console UI tests.
+	node --test internal/desktopgateway/static/index.test.mjs
+
+.PHONY: test-all
+test-all: test test-guest test-extension test-console
 
 .PHONY: install
 install: manifests ## Install CRDs and manager RBAC into the configured cluster.

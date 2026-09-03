@@ -7,7 +7,8 @@ status: accepted
 ADR 0004 deferred agent-authored configuration changes: no mediated write
 transport exists from the runtime to the operator, and inventing a write path
 into the single-writer Agent Folder would violate the ownership model. On
-2026-08-25 the product owner asked to proceed anyway ("SelfConfig도 진행").
+2026-08-25 the product owner asked to proceed anyway — in their words,
+translated from Korean: "go ahead with SelfConfig too".
 This ADR records v1 observation through a sanitized runtime contract without
 adding an operator-owned write authority.
 

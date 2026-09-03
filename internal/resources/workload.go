@@ -16,6 +16,7 @@ import (
 
 	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
 	"github.com/fml09/typeclaw-operator/internal/credential"
+	"github.com/fml09/typeclaw-operator/internal/desktop"
 )
 
 const (
@@ -202,6 +203,48 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 		})
 	}
 
+	if desktopProjected(instance) {
+		names := desktop.Names(instance)
+		runtimeEnv = append(runtimeEnv,
+			corev1.EnvVar{Name: "TYPECLAW_PLATFORM_EXTENSIONS", Value: desktop.ExtensionEntrypoint},
+			corev1.EnvVar{Name: "PERSONAL_DESKTOP_GATEWAY_URL", Value: desktop.GatewayURL(instance)},
+			corev1.EnvVar{
+				Name: "PERSONAL_DESKTOP_AGENT_TOKEN",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						// Always the Instance-namespace copy of the token: a
+						// Pod cannot project a Secret from another namespace,
+						// so a desktop in a dedicated namespace is served by
+						// the mirror the desktop controller maintains here.
+						LocalObjectReference: corev1.LocalObjectReference{Name: names.Tokens},
+						Key:                  desktop.TokenKeyAgent,
+					},
+				},
+			},
+		)
+		if consoleURL := desktopConsoleURL(instance); consoleURL != "" {
+			runtimeEnv = append(runtimeEnv, corev1.EnvVar{
+				Name: "PERSONAL_DESKTOP_CONSOLE_URL", Value: consoleURL,
+			})
+		}
+		volumes = append(volumes, corev1.Volume{
+			Name: desktop.ExtensionVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: names.Extension},
+				},
+			},
+		})
+		// Read-only and outside the Agent Folder: a Platform Extension is
+		// administrator-owned, so the model it constrains must not be able to
+		// rewrite, shadow, or delete it.
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      desktop.ExtensionVolumeName,
+			MountPath: desktop.ExtensionMountPath,
+			ReadOnly:  true,
+		})
+	}
+
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
@@ -281,6 +324,30 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 		sts.Spec.Template.Spec.Volumes = append(sts.Spec.Template.Spec.Volumes, RelayTokenVolume(), RelayCAVolume())
 	}
 	return sts, nil
+}
+
+// desktopProjected reports whether the Managed Runtime receives the Personal
+// Desktop wiring. It repeats exactly the preconditions under which the desktop
+// controller writes the projected Secret and ConfigMap, and must keep doing
+// so: a Pod whose secretKeyRef or ConfigMap volume names an object nobody
+// creates never starts, so any condition that stops the controller short of
+// those two objects has to stop the projection as well. That covers an older
+// runtime, which ignores TYPECLAW_PLATFORM_EXTENSIONS anyway, and a desktop
+// spec the renderer rejects — a typo confined to the desktop block must not
+// take the whole runtime down.
+func desktopProjected(instance *typeclawv1alpha1.TypeClawInstance) bool {
+	return desktop.Enabled(instance) &&
+		desktop.Validate(instance) == nil &&
+		desktop.RuntimeSupportsExtensions(instance)
+}
+
+// desktopConsoleURL is the published Desktop Console address the controller
+// observed on the console Ingress, empty until the access provider reports one.
+func desktopConsoleURL(instance *typeclawv1alpha1.TypeClawInstance) string {
+	if instance.Status.PersonalDesktop == nil {
+		return ""
+	}
+	return instance.Status.PersonalDesktop.ConsoleURL
 }
 
 // seccompProfileFor resolves the declared seccomp posture. Unset or Localhost

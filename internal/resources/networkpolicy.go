@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
+	"github.com/fml09/typeclaw-operator/internal/desktop"
 )
 
 const (
@@ -73,8 +74,22 @@ var netPublicWebV6Except = []string{
 // apiServerIPs carries the discovered Kubernetes API server endpoints; when
 // SelfConfig observation is on, the relay sidecar needs exactly these
 // destinations on 443 to reach the API from inside a PublicWeb policy.
-func NetworkPolicy(instance *typeclawv1alpha1.TypeClawInstance, apiServerIPs ...string) *networkingv1.NetworkPolicy {
+// desktopGatewayIP is the Personal Desktop Gateway Service's cluster IP, empty
+// until the Service exists; both are cluster observations rather than spec, so
+// they arrive as arguments instead of being read from the Instance.
+func NetworkPolicy(
+	instance *typeclawv1alpha1.TypeClawInstance,
+	apiServerIPs []string,
+	desktopGatewayIP string,
+) *networkingv1.NetworkPolicy {
 	labels := Labels(instance)
+	egress := netEgressRules(instance.Spec.Network.Egress, apiServerIPs...)
+	if desktop.Enabled(instance) {
+		// PublicWeb deliberately excludes cluster-internal destinations, so
+		// without this rule every typed action the agent sends to its own
+		// Personal Desktop would be dropped by its own boundary.
+		egress = append(egress, desktop.RuntimeGatewayEgressRule(instance, desktopGatewayIP))
+	}
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
@@ -88,7 +103,7 @@ func NetworkPolicy(instance *typeclawv1alpha1.TypeClawInstance, apiServerIPs ...
 				networkingv1.PolicyTypeEgress,
 			},
 			Ingress: netIngressRules(instance),
-			Egress:  netEgressRules(instance.Spec.Network.Egress, apiServerIPs...),
+			Egress:  egress,
 		},
 	}
 }

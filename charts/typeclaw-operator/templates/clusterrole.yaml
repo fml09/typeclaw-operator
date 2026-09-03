@@ -5,21 +5,31 @@ metadata:
   name: {{ include "typeclaw-operator.fullname" . }}-manager-role
   labels:
     {{- include "typeclaw-operator.labels" . | nindent 4 }}
+# Kept in step with config/rbac/role.yaml by hand: controller-gen writes only
+# the config/ copy, and nothing syncs the two. TestChartClusterRoleMatchesGeneratedRole
+# fails when they diverge.
 rules:
+  - apiGroups:
+    - ""
+    resources:
+    - configmaps
+    - persistentvolumeclaims
+    - secrets
+    - serviceaccounts
+    - services
+    verbs:
+    - create
+    - delete
+    - get
+    - list
+    - patch
+    - update
+    - watch
   - apiGroups:
     - ""
     resources:
     - endpoints
     verbs:
-    - get
-    - list
-    - watch
-  - apiGroups:
-    - ""
-    resources:
-    - pods
-    verbs:
-    - delete
     - get
     - list
     - watch
@@ -33,20 +43,16 @@ rules:
   - apiGroups:
     - ""
     resources:
-    - persistentvolumeclaims
-    - serviceaccounts
-    - services
+    - pods
     verbs:
-    - create
     - delete
     - get
     - list
-    - patch
-    - update
     - watch
   - apiGroups:
     - apps
     resources:
+    - deployments
     - statefulsets
     verbs:
     - create
@@ -70,8 +76,32 @@ rules:
     - update
     - watch
   - apiGroups:
+    - cdi.kubevirt.io
+    resources:
+    - datavolumes
+    verbs:
+    - create
+    - delete
+    - get
+    - list
+    - watch
+  - apiGroups:
+    - kubevirt.io
+    resources:
+    - virtualmachineinstances
+    - virtualmachines
+    verbs:
+    - create
+    - delete
+    - get
+    - list
+    - patch
+    - update
+    - watch
+  - apiGroups:
     - networking.k8s.io
     resources:
+    - ingresses
     - networkpolicies
     verbs:
     - create
@@ -94,6 +124,50 @@ rules:
     - patch
     - update
     - watch
+  # The Desktop Gateway's Role names these KubeVirt subresources, and the API
+  # server refuses to let the manager grant what it does not hold itself.
+  - apiGroups:
+    - subresources.kubevirt.io
+    resources:
+    - virtualmachineinstances/vnc
+    - virtualmachineinstances/vnc/screenshot
+    verbs:
+    - get
+  - apiGroups:
+    - subresources.kubevirt.io
+    resources:
+    - virtualmachines/start
+    - virtualmachines/stop
+    verbs:
+    - update
+  - apiGroups:
+    - typeclaw.fml09.io
+    resources:
+    - credentialapprovals
+    verbs:
+    - get
+    - list
+    - watch
+  - apiGroups:
+    - typeclaw.fml09.io
+    resources:
+    - credentialrequests
+    verbs:
+    - create
+    - get
+    - list
+    - patch
+    - update
+    - watch
+  - apiGroups:
+    - typeclaw.fml09.io
+    resources:
+    - credentialrequests/status
+    - typeclawinstances/status
+    verbs:
+    - get
+    - patch
+    - update
   - apiGroups:
     - typeclaw.fml09.io
     resources:
@@ -112,47 +186,4 @@ rules:
     - typeclawinstances/finalizers
     verbs:
     - update
-  - apiGroups:
-    - typeclaw.fml09.io
-    resources:
-    - typeclawinstances/status
-    verbs:
-    - get
-    - patch
-    - update
-  - apiGroups:
-    - ""
-    resources:
-    - secrets
-    verbs:
-    - get
-  - apiGroups:
-    - typeclaw.fml09.io
-    resources:
-    - credentialrequests
-    verbs:
-    - create
-    - get
-    - list
-    - patch
-    - update
-    - watch
-  - apiGroups:
-    - typeclaw.fml09.io
-    resources:
-    - credentialapprovals
-    verbs:
-    - get
-    - list
-    - watch
-  - apiGroups:
-    - typeclaw.fml09.io
-    resources:
-    - credentialrequests/status
-    verbs:
-    - get
-    - patch
-    - update
 {{- end }}
-
-# fresh render r2

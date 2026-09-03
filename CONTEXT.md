@@ -48,6 +48,26 @@ _Avoid_: Sandbox Pod, shared worker
 A revisioned, explicitly bounded view of Agent Folder state made available to a remote Tool Execution Environment. Changes return as a validated delta rather than through a live Agent Folder mount.
 _Avoid_: Agent Folder mount, shared workspace
 
+**Personal Desktop**:
+A persistent, single-owner interactive desktop bound to one TypeClaw Instance. Its durable state and its ownership outlive every session, which is what separates it from a Sandbox Lease.
+_Avoid_: Persistent sandbox, desktop lease
+
+**Desktop Gateway**:
+The single authority that mediates every access to one Personal Desktop, for the human owner and for the agent alike. No other party reaches that desktop's console or its typed-action surface.
+_Avoid_: VNC proxy, desktop broker
+
+**Desktop Console**:
+The human owner's authenticated view of a Personal Desktop, published through an administrator-declared access provider that asserts the viewer's identity. It is never reachable without that assertion.
+_Avoid_: VNC URL, noVNC page
+
+**Guest Desktop Agent**:
+The boundary inside a Personal Desktop's interactive session that executes typed actions and captures the screen. Its protocol is OS-agnostic; whichever platform backend satisfies it is outside the boundary.
+_Avoid_: Automation script, VNC server
+
+**Input Controller**:
+The one party, human or agent, that currently holds exclusive input authority over a Personal Desktop. Authority transfers through an explicit handover and is never held concurrently.
+_Avoid_: Active session, shared control
+
 **Platform Extension**:
 An administrator-owned immutable extension that adds trusted tools, skills, helpers, schemas, or credential-use declarations to a TypeClaw Instance.
 _Avoid_: System plugin, agent plugin

@@ -3,118 +3,118 @@
 Status: feasibility and architecture research; not an accepted design  
 Observed: 2026-08-30
 
-## 결론
+## Conclusion
 
-구현할 수 있습니다. 다만 범위를 “TypeClaw plugin 하나”로 잡으면 안 됩니다.
+It can be built. The scope must not be framed as “one TypeClaw plugin”, however.
 
-TypeClaw plugin은 모델에 `observe`와 `act` 같은 typed tool을 노출하는 **Platform Extension**이어야 합니다. Windows 설치, VM 생성·폐기, 인증, 네트워크 격리, 화면 캡처와 입력 실행은 plugin 밖의 새로운 Windows-backed **RemoteSandbox** provider가 맡아야 합니다. 현재 repository에 이 provider는 없으며, 현행 production `RemoteSandbox` 계약은 gVisor/Kata-class `RuntimeClass`를 전제로 하므로 KubeVirt VM을 production provider로 인정하려면 별도 ADR과 보안 certification이 필요합니다 ([ADR 0001](../adr/0001-restricted-workload-and-tool-execution-boundaries.md)).
+The TypeClaw plugin has to be a **Platform Extension** that exposes typed tools such as `observe` and `act` to the model. Windows installation, VM creation and disposal, authentication, network isolation, screen capture, and input execution have to be owned by a new Windows-backed **RemoteSandbox** provider outside the plugin. That provider does not exist in the current repository, and because the current production `RemoteSandbox` contract presumes a gVisor/Kata-class `RuntimeClass`, accepting a KubeVirt VM as a production provider requires a separate ADR and security certification ([ADR 0001](../adr/0001-restricted-workload-and-tool-execution-boundaries.md)).
 
-권장 구조는 다음 네 부분입니다.
+The recommended structure has the following four parts.
 
-1. TypeClaw의 signed, digest-pinned `computer-use` Platform Extension이 모델에 작은 typed tool surface를 제공합니다.
-2. Kubernetes credential이 없는 Sandbox Broker가 Sandbox Lease, per-invocation authorization, protocol fencing, output bound를 집행합니다.
-3. 별도 Kubernetes-facing Sandbox Reconciler만 KubeVirt/CDI/Service/NetworkPolicy/PVC/Secret API를 사용할 수 있습니다.
-4. 각 Windows VM 안에는 QEMU Guest Agent와 별도로, 실제 사용자 desktop session에서 실행되는 Windows Computer Agent가 있습니다. PoC에서는 이 agent가 version/hash-pinned Microsoft `winapp ui` 명령만 allowlist로 감싸고, production에서는 그 구현을 project-owned stable protocol 뒤에 숨깁니다.
+1. TypeClaw's signed, digest-pinned `computer-use` Platform Extension gives the model a small typed tool surface.
+2. A Sandbox Broker with no Kubernetes credential enforces the Sandbox Lease, per-invocation authorization, protocol fencing, and output bounds.
+3. Only a separate Kubernetes-facing Sandbox Reconciler may use the KubeVirt/CDI/Service/NetworkPolicy/PVC/Secret APIs.
+4. Inside every Windows VM there is, separately from the QEMU Guest Agent, a Windows Computer Agent that runs in the real user desktop session. In the PoC that agent wraps only version- and hash-pinned Microsoft `winapp ui` commands behind an allowlist; in production its implementation hides behind a project-owned stable protocol.
 
-이 판단의 확실성은 단계별로 다릅니다.
+The certainty of this judgement differs from step to step.
 
-| 질문 | 판단 | 근거와 한계 |
+| Question | Judgement | Evidence and limits |
 |---|---|---|
-| TypeClaw가 screenshot을 보고 Windows action을 호출할 수 있는가? | **가능** | TypeClaw plugin tool은 Zod-typed argument, cancellation signal, text/image result를 지원합니다. |
-| KubeVirt에 unattended Windows image를 만들고 lease마다 복제할 수 있는가? | **가능** | CDI, DataVolume, Sysprep, virtio driver, QEMU Guest Agent, PVC clone/snapshot 경로가 공식 문서에 있습니다. |
-| E2B Desktop 구현을 그대로 port할 수 있는가? | **불가능** | E2B Desktop은 Ubuntu/X11의 `scrot`, `xdotool`, `x11vnc`, noVNC에 직접 결합되어 있습니다. 재사용 대상은 API shape와 control/viewing 분리 원칙입니다. |
-| 잠금 화면, LogonUI, UAC secure desktop까지 일반 tool처럼 조작할 수 있는가? | **지원하지 않아야 함** | 실제 input injection은 unlocked interactive desktop을 요구하고 secure desktop에서 실패합니다. UAC를 끄거나 이를 우회하는 방식은 보안 경계를 무너뜨립니다. |
-| 지금 이 repository가 production-ready KubeVirt provider를 제공하는가? | **아니요** | KubeVirt API/RBAC, Sandbox Lease, VM/PVC lifecycle, Windows guest protocol, status, NetworkPolicy와 E2E가 모두 새 scope입니다. |
-| E2B와 같은 startup latency를 보장할 수 있는가? | **미확정** | E2B는 pre-booted Firecracker snapshot을 사용하지만 KubeVirt Windows clone은 storage와 OOBE에 좌우됩니다. KubeVirt 예제도 clone 후 OOBE에 최대 약 5분이 걸릴 수 있다고 경고합니다. |
+| Can TypeClaw look at a screenshot and invoke Windows actions? | **Yes** | A TypeClaw plugin tool supports Zod-typed arguments, a cancellation signal, and text/image results. |
+| Can an unattended Windows image be built on KubeVirt and cloned per lease? | **Yes** | CDI, DataVolume, Sysprep, virtio drivers, the QEMU Guest Agent, and PVC clone/snapshot paths are all in the official documentation. |
+| Can the E2B Desktop implementation be ported as-is? | **No** | E2B Desktop is coupled directly to `scrot`, `xdotool`, `x11vnc`, and noVNC on Ubuntu/X11. What is reusable is the API shape and the principle of separating control from viewing. |
+| Can the lock screen, LogonUI, and the UAC secure desktop be driven like ordinary tools? | **Must not be supported** | Real input injection requires an unlocked interactive desktop and fails on the secure desktop. Turning UAC off, or working around it, tears down the security boundary. |
+| Does this repository provide a production-ready KubeVirt provider today? | **No** | KubeVirt API/RBAC, the Sandbox Lease, VM/PVC lifecycle, the Windows guest protocol, status, NetworkPolicy, and E2E are all new scope. |
+| Can startup latency equal to E2B's be guaranteed? | **Undetermined** | E2B uses pre-booted Firecracker snapshots, while a KubeVirt Windows clone depends on storage and OOBE. The KubeVirt examples themselves warn that OOBE after a clone can take up to roughly 5 minutes. |
 
-따라서 권장 목표는 먼저 **single-VM experimental PoC**를 만드는 것입니다. 이 PoC에서도 plugin에는 Kubernetes credential을 주지 않고, 실제 외부 account credential은 사용하지 않습니다. 그 뒤 lease/reconciler와 SPIFFE identity를 붙이고, failure injection과 provider certification을 통과한 경우에만 production 승격을 검토해야 합니다.
+The recommended goal is therefore to build a **single-VM experimental PoC** first. Even in that PoC the plugin receives no Kubernetes credential and no real external account credential is used. Attach the lease/reconciler and SPIFFE identity afterwards, and consider promotion to production only once failure injection and provider certification pass.
 
-## Evidence policy와 관찰 기준
+## Evidence policy and observation basis
 
-이 문서는 다음 표기를 사용합니다.
+This document uses the following labels.
 
-- **Observed fact**는 pinned official source나 이 repository의 accepted ADR/code에서 직접 확인한 사실입니다.
-- **Inference**는 여러 observed fact에서 도출한 설계 판단입니다.
-- **Recommendation**은 이 project가 채택할 후보 설계입니다. accepted ADR이 아닙니다.
-- **Assumption**은 PoC에서 검증하거나 사람이 결정해야 하는 조건입니다.
+- **Observed fact** is something confirmed directly in a pinned official source or in this repository's accepted ADRs and code.
+- **Inference** is a design judgement derived from several observed facts.
+- **Recommendation** is a candidate design for this project to adopt. It is not an accepted ADR.
+- **Assumption** is a condition to verify in the PoC or for a human to decide.
 
-Upstream source는 다음 revision을 기준으로 읽었습니다.
+The upstream sources were read at the following revisions.
 
 - TypeClaw upstream `main`: [`9439953bcc117c207dde3b0047730b7398457787`](https://github.com/typeclaw/typeclaw/tree/9439953bcc117c207dde3b0047730b7398457787).
 - Owner-managed runtime fork: [`fml09/typeclaw@c95fede9cbf54598179b2c00723507207039ea29`](https://github.com/fml09/typeclaw/tree/c95fede9cbf54598179b2c00723507207039ea29).
 - E2B Desktop template: [`89a545e22343aa1c40f28338bf3281a6c04b1d4a`](https://github.com/e2b-dev/desktop/tree/89a545e22343aa1c40f28338bf3281a6c04b1d4a), SDK: [`5a56c87e9db0e221b138662805af7743e75f1082`](https://github.com/e2b-dev/E2B/tree/5a56c87e9db0e221b138662805af7743e75f1082), infrastructure: [`d73e2b1f51cbd7e4d477452ee152571a9d7d08fd`](https://github.com/e2b-dev/infra/tree/d73e2b1f51cbd7e4d477452ee152571a9d7d08fd).
-- Target virtualization stack: [KubeVirt `v1.9.0`](https://github.com/kubevirt/kubevirt/releases/tag/v1.9.0), [CDI `v1.66.0`](https://github.com/kubevirt/containerized-data-importer/releases/tag/v1.66.0). Windows/storage documentation은 pinned user-guide revision [`bf1f3564e2a41eb059df5ab126724bb78cf15200`](https://github.com/kubevirt/user-guide/tree/bf1f3564e2a41eb059df5ab126724bb78cf15200)을 사용했습니다.
-- Microsoft `winapp` release [`v0.5.0`](https://github.com/microsoft/winappCli/releases/tag/v0.5.0), commit [`fd7cb6f235fa54dd2c6e26386e65e967a2c8797a`](https://github.com/microsoft/winappCli/tree/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a). 이 release는 스스로 Public Preview이자 experimental이라고 명시하므로 production stability 증거가 아닙니다 ([README](https://github.com/microsoft/winappCli/blob/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a/README.md#L1-L7)).
-- SPIRE Windows identity 후보는 current release [`v1.15.3`](https://github.com/spiffe/spire/releases/tag/v1.15.3)를 기준으로 했습니다.
+- Target virtualization stack: [KubeVirt `v1.9.0`](https://github.com/kubevirt/kubevirt/releases/tag/v1.9.0), [CDI `v1.66.0`](https://github.com/kubevirt/containerized-data-importer/releases/tag/v1.66.0). The Windows/storage documentation was read at the pinned user-guide revision [`bf1f3564e2a41eb059df5ab126724bb78cf15200`](https://github.com/kubevirt/user-guide/tree/bf1f3564e2a41eb059df5ab126724bb78cf15200).
+- Microsoft `winapp` release [`v0.5.0`](https://github.com/microsoft/winappCli/releases/tag/v0.5.0), commit [`fd7cb6f235fa54dd2c6e26386e65e967a2c8797a`](https://github.com/microsoft/winappCli/tree/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a). That release states of itself that it is a Public Preview and experimental, so it is not evidence of production stability ([README](https://github.com/microsoft/winappCli/blob/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a/README.md#L1-L7)).
+- The SPIRE Windows identity candidate was read at the current release [`v1.15.3`](https://github.com/spiffe/spire/releases/tag/v1.15.3).
 
-## TypeClaw에서 가능한 extension seam
+## Extension seams available in TypeClaw
 
-### Plugin tool은 computer-use facade를 표현할 수 있습니다
+### A plugin tool can express the computer-use facade
 
-**Observed fact.** TypeClaw plugin은 agent loop와 같은 Bun process에 로드되는 trusted TypeScript module이며, tool, skill, subagent, hook 등을 기여할 수 있습니다 ([plugin model](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/docs/content/docs/concepts/plugins-and-stages.mdx#L7-L17), [contributions](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/docs/content/docs/concepts/plugins-and-stages.mdx#L31-L45)). Tool contract에는 Zod parameters, `AbortSignal`, session ID와 `{type: "text"}` 또는 `{type: "image", mimeType, data}` result가 있습니다 ([Plugin API](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/docs/content/docs/reference/plugin-api.mdx#L75-L101), [source type](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/plugin/types.ts#L8-L47)).
+**Observed fact.** A TypeClaw plugin is a trusted TypeScript module loaded into the same Bun process as the agent loop, and it can contribute tools, skills, subagents, hooks, and more ([plugin model](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/docs/content/docs/concepts/plugins-and-stages.mdx#L7-L17), [contributions](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/docs/content/docs/concepts/plugins-and-stages.mdx#L31-L45)). The tool contract carries Zod parameters, an `AbortSignal`, a session ID, and a `{type: "text"}` or `{type: "image", mimeType, data}` result ([Plugin API](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/docs/content/docs/reference/plugin-api.mdx#L75-L101), [source type](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/plugin/types.ts#L8-L47)).
 
-**Inference.** Model-facing `observe`와 `act`는 새 upstream agent loop 없이 plugin tool로 만들 수 있습니다. Screenshot도 image result로 직접 모델에 돌려줄 수 있습니다. Lease acquire/release는 model tool로 노출하지 않고 TypeClaw session lifecycle에 bind하는 편이 권한 surface가 작습니다.
+**Inference.** Model-facing `observe` and `act` can be built as plugin tools without a new upstream agent loop. A screenshot can also be returned to the model directly as an image result. Binding lease acquire/release to the TypeClaw session lifecycle instead of exposing them as model tools keeps the permission surface smaller.
 
-**Constraint.** Plugin은 sandbox가 아닙니다. 같은 process, filesystem, network, workload identity를 공유하므로 KubeVirt token이나 cluster-admin credential을 plugin에 주면 TypeClaw 전체에 그 권한을 주는 것과 같습니다. accepted ADR도 runtime, broker, sandbox가 Kubernetes credential을 받지 않고 reconciler만 narrow RBAC를 사용하도록 정합니다 ([ADR 0001](../adr/0001-restricted-workload-and-tool-execution-boundaries.md), [ADR 0002](../adr/0002-spiffe-workload-identity-and-credential-execution.md)).
+**Constraint.** A plugin is not a sandbox. It shares the same process, filesystem, network, and workload identity, so handing a plugin a KubeVirt token or a cluster-admin credential is the same as handing that authority to all of TypeClaw. The accepted ADRs likewise require that the runtime, broker, and sandbox receive no Kubernetes credential and that only the reconciler uses narrow RBAC ([ADR 0001](../adr/0001-restricted-workload-and-tool-execution-boundaries.md), [ADR 0002](../adr/0002-spiffe-workload-identity-and-credential-execution.md)).
 
-**Constraint.** Current managed-runtime image는 임의 plugin을 동적으로 설치하지 않습니다. Platform은 plugin을 boot 전에 hydrate하거나 derived image를 만들어야 하며, TypeClaw process는 cluster API credential을 받지 않습니다 ([managed-runtime image contract](https://github.com/fml09/typeclaw/blob/c95fede9cbf54598179b2c00723507207039ea29/docs/content/docs/internals/managed-runtime.mdx#L7-L23)). Production extension은 mutable Agent Folder plugin이 아니라 ADR 0002의 signed, digest-pinned OCI Platform Bundle이어야 합니다.
+**Constraint.** The current managed-runtime image does not install arbitrary plugins dynamically. The platform has to hydrate the plugin before boot or build a derived image, and the TypeClaw process receives no cluster API credential ([managed-runtime image contract](https://github.com/fml09/typeclaw/blob/c95fede9cbf54598179b2c00723507207039ea29/docs/content/docs/internals/managed-runtime.mdx#L7-L23)). A production extension has to be ADR 0002's signed, digest-pinned OCI Platform Bundle rather than a mutable Agent Folder plugin.
 
-**Recommendation.** 첫 구현은 HTTP MCP보다 direct TypeClaw plugin이 낫습니다. Direct plugin은 각 operation을 named tool로 노출하고 `AbortSignal`, session ID, custom mTLS/auth client와 per-tool permission/result cap을 사용할 수 있습니다. 현재 HTTP MCP surface는 model이 `mcp_list_tools`/`mcp_describe`/`mcp_call` dispatcher를 거치며 ([MCP contract](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/docs/content/docs/reference/mcp.mdx#L9-L15)), HTTP config에는 arbitrary static header field가 없습니다 ([config source](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/config/config.ts#L90-L122)). 이미 OAuth-enabled MCP service가 있을 때는 MCP도 가능하지만, project-owned Broker adapter에는 direct plugin의 contract가 더 작습니다.
+**Recommendation.** For the first implementation a direct TypeClaw plugin is better than HTTP MCP. A direct plugin exposes each operation as a named tool and can use `AbortSignal`, the session ID, a custom mTLS/auth client, and per-tool permission and result caps. The current HTTP MCP surface routes the model through the `mcp_list_tools`/`mcp_describe`/`mcp_call` dispatcher ([MCP contract](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/docs/content/docs/reference/mcp.mdx#L9-L15)), and the HTTP config has no arbitrary static header field ([config source](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/config/config.ts#L90-L122)). MCP is also viable where an OAuth-enabled MCP service already exists, but for a project-owned Broker adapter the direct plugin's contract is smaller.
 
-**Constraint.** Plugin의 `permissions` 선언은 permission string을 등록할 뿐 자동 authorization을 수행하지 않습니다 ([permission registry](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/permissions/permissions.ts#L102-L122)). `computer-use.control`을 role에 명시적으로 grant하고, `tool.before`에서 `event.origin`과 `ctx.permissions.has(...)`를 검사해 모든 control tool을 fail closed해야 합니다.
+**Constraint.** A plugin's `permissions` declaration only registers permission strings; it performs no automatic authorization ([permission registry](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/permissions/permissions.ts#L102-L122)). `computer-use.control` must be granted to a role explicitly, and every control tool must fail closed by checking `event.origin` and `ctx.permissions.has(...)` in `tool.before`.
 
-### Screenshot size는 별도의 acceptance gate입니다
+### Screenshot size is a separate acceptance gate
 
-**Observed fact.** 모든 TypeClaw agent에 auto-loaded되는 `tool-result-cap`은 기본적으로 image result의 base64 string을 262,144 bytes로 제한하고, 초과한 image를 text placeholder로 바꿉니다. 이는 decoded image로 약 190 KiB 수준입니다 ([tool-result-cap contract](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/bundled-plugins/tool-result-cap/README.md#L1-L18), [defaults](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/bundled-plugins/tool-result-cap/README.md#L24-L38)).
+**Observed fact.** `tool-result-cap`, auto-loaded into every TypeClaw agent, limits an image result's base64 string to 262,144 bytes by default and replaces an oversized image with a text placeholder. That is roughly 190 KiB of decoded image ([tool-result-cap contract](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/bundled-plugins/tool-result-cap/README.md#L1-L18), [defaults](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/bundled-plugins/tool-result-cap/README.md#L24-L38)).
 
-**Practical consequence.** `1024x768` Windows PNG를 그대로 반환하면 screenshot 대신 placeholder만 모델에 전달될 수 있습니다. PoC는 다음 순서로 처리해야 합니다.
+**Practical consequence.** Returning a `1024x768` Windows PNG as-is can deliver a placeholder to the model instead of the screenshot. The PoC has to work through the following order.
 
-1. Fixed resolution에서 PNG, JPEG 또는 WebP의 실제 크기와 model readability를 측정합니다.
-2. 먼저 downscale, adaptive compression, region capture로 bound를 지킵니다.
-3. 그래도 부족하면 `computer_observe`의 fully-qualified tool name만 cap exemption에 넣습니다. 전체 cap을 끄면 매 turn transcript와 model context가 커지므로 금지합니다.
-4. 원본 frame은 짧은 TTL의 broker-side object로 보관하고, 모델에는 bounded rendition만 보냅니다. 원본 object ID가 임의 file read나 cross-lease access로 이어져서는 안 됩니다.
+1. Measure the actual size and the model readability of PNG, JPEG, or WebP at a fixed resolution.
+2. Stay inside the bound first through downscaling, adaptive compression, and region capture.
+3. If that is still not enough, add only `computer_observe`'s fully-qualified tool name to the cap exemption. Turning the whole cap off grows the transcript and model context every turn and is forbidden.
+4. Keep the original frame as a short-TTL broker-side object and send the model only a bounded rendition. The original object ID must never lead to arbitrary file reads or cross-lease access.
 
-Screenshot tool이 image를 반환해도 configured model이 image input을 지원하지 않으면 computer-use loop는 성립하지 않습니다. Observed TypeClaw default model은 text와 image input을 선언하지만 ([provider registry](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/config/providers.ts#L68-L80), [default selection](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/config/providers.ts#L1338-L1342)), custom profile까지 일반화할 수는 없습니다. Lease acquire 전에 model capability를 확인하고 text-only model이면 tool을 unavailable로 둡니다.
+Even when the screenshot tool returns an image, the computer-use loop does not hold if the configured model does not support image input. The observed TypeClaw default model declares text and image input ([provider registry](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/config/providers.ts#L68-L80), [default selection](https://github.com/typeclaw/typeclaw/blob/9439953bcc117c207dde3b0047730b7398457787/src/config/providers.ts#L1338-L1342)), but that cannot be generalized to custom profiles. Check the model capability before acquiring a lease and leave the tool unavailable for a text-only model.
 
-## E2B Desktop에서 가져올 것과 버릴 것
+## What to take from E2B Desktop and what to discard
 
-### 실제 E2B architecture
+### The actual E2B architecture
 
-**Observed fact.** E2B Desktop image는 Ubuntu 22.04에 Xorg/Xvfb/Xfce, `xdotool`, `scrot`, `x11vnc`, noVNC/websockify와 desktop application을 설치합니다 ([template](https://github.com/e2b-dev/desktop/blob/89a545e22343aa1c40f28338bf3281a6c04b1d4a/template/template.py#L3-L78)). Runtime은 container가 아니라 pre-booted snapshot에서 resume되는 isolated Firecracker Linux microVM이며 control plane과 sandbox data plane이 분리됩니다 ([E2B architecture](https://github.com/e2b-dev/infra/blob/d73e2b1f51cbd7e4d477452ee152571a9d7d08fd/docs/ARCHITECTURE.md#L13-L28), [runtime path](https://github.com/e2b-dev/infra/blob/d73e2b1f51cbd7e4d477452ee152571a9d7d08fd/docs/ARCHITECTURE.md#L152-L220)).
+**Observed fact.** The E2B Desktop image installs Xorg/Xvfb/Xfce, `xdotool`, `scrot`, `x11vnc`, noVNC/websockify, and desktop applications on Ubuntu 22.04 ([template](https://github.com/e2b-dev/desktop/blob/89a545e22343aa1c40f28338bf3281a6c04b1d4a/template/template.py#L3-L78)). The runtime is not a container but an isolated Firecracker Linux microVM resumed from a pre-booted snapshot, with the control plane separated from the sandbox data plane ([E2B architecture](https://github.com/e2b-dev/infra/blob/d73e2b1f51cbd7e4d477452ee152571a9d7d08fd/docs/ARCHITECTURE.md#L13-L28), [runtime path](https://github.com/e2b-dev/infra/blob/d73e2b1f51cbd7e4d477452ee152571a9d7d08fd/docs/ARCHITECTURE.md#L152-L220)).
 
-**Observed fact.** E2B Desktop SDK의 screenshot은 `scrot`로 PNG file을 만든 뒤 E2B filesystem API로 읽고, mouse와 keyboard action은 `xdotool` shell command를 실행합니다 ([screenshot](https://github.com/e2b-dev/E2B/blob/5a56c87e9db0e221b138662805af7743e75f1082/packages/desktop-js/src/sandbox.ts#L241-L274), [input](https://github.com/e2b-dev/E2B/blob/5a56c87e9db0e221b138662805af7743e75f1082/packages/desktop-js/src/sandbox.ts#L276-L458)). Human stream은 guest의 `x11vnc:5900`과 noVNC/websockify `:6080`을 별도로 시작합니다 ([VNC server](https://github.com/e2b-dev/E2B/blob/5a56c87e9db0e221b138662805af7743e75f1082/packages/desktop-js/src/sandbox.ts#L596-L752)).
+**Observed fact.** The E2B Desktop SDK's screenshot creates a PNG file with `scrot` and reads it back through the E2B filesystem API, and mouse and keyboard actions run `xdotool` shell commands ([screenshot](https://github.com/e2b-dev/E2B/blob/5a56c87e9db0e221b138662805af7743e75f1082/packages/desktop-js/src/sandbox.ts#L241-L274), [input](https://github.com/e2b-dev/E2B/blob/5a56c87e9db0e221b138662805af7743e75f1082/packages/desktop-js/src/sandbox.ts#L276-L458)). The human stream separately starts the guest's `x11vnc:5900` and noVNC/websockify `:6080` ([VNC server](https://github.com/e2b-dev/E2B/blob/5a56c87e9db0e221b138662805af7743e75f1082/packages/desktop-js/src/sandbox.ts#L596-L752)).
 
-**Inference.** E2B source의 Linux/X11 implementation은 Windows에 port할 수 없습니다. 대신 다음 contract shape는 재사용할 가치가 있습니다.
+**Inference.** The Linux/X11 implementation in the E2B source cannot be ported to Windows. The following contract shapes are worth reusing instead.
 
-- sandbox identity와 model action API를 분리합니다.
-- screenshot과 action은 동일한 native-pixel coordinate space를 사용합니다.
-- action batch 뒤에 settle/wait하고 새 screenshot으로 effect를 확인합니다.
-- agent control path와 사람용 live viewer path를 분리합니다.
-- golden image/snapshot에서 새 isolated session을 시작합니다.
+- Separate sandbox identity from the model action API.
+- Screenshots and actions use the same native-pixel coordinate space.
+- Settle and wait after an action batch, then confirm the effect with a new screenshot.
+- Separate the agent control path from the human live-viewer path.
+- Start each new isolated session from a golden image or snapshot.
 
-E2B의 noVNC `viewOnly` flag는 browser-side `RFB.viewOnly` 설정일 뿐 server authorization이 아닙니다 ([noVNC fork](https://github.com/e2b-dev/noVNC/blob/461b7f1ccb20755037d8995612e5fb08ed16f9e4/app/ui.js#L1732-L1740)). 이 UI option을 TypeClaw authorization boundary로 복사하면 안 됩니다.
+E2B's noVNC `viewOnly` flag is only a browser-side `RFB.viewOnly` setting, not server authorization ([noVNC fork](https://github.com/e2b-dev/noVNC/blob/461b7f1ccb20755037d8995612e5fb08ed16f9e4/app/ui.js#L1732-L1740)). This UI option must not be copied into the TypeClaw authorization boundary.
 
-## KubeVirt가 제공하는 것과 제공하지 않는 것
+## What KubeVirt provides and what it does not
 
-### Provisioning과 lifecycle substrate
+### Provisioning and lifecycle substrate
 
-**Observed fact.** CDI는 HTTP/registry import, existing PVC clone, local image upload를 DataVolume으로 제공하고 raw, qcow2와 ISO를 지원합니다 ([CDI overview](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/storage/containerized_data_importer.md#L1-L17), [formats](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/storage/containerized_data_importer.md#L53-L58)). KubeVirt는 referenced DataVolume의 import나 clone이 끝날 때까지 VMI start를 보류합니다 ([DataVolume behavior](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/storage/disks_and_volumes.md#L530-L609)).
+**Observed fact.** CDI provides HTTP/registry import, cloning of an existing PVC, and local image upload as DataVolumes, and supports raw, qcow2, and ISO ([CDI overview](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/storage/containerized_data_importer.md#L1-L17), [formats](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/storage/containerized_data_importer.md#L53-L58)). KubeVirt holds VMI start until the import or clone of a referenced DataVolume finishes ([DataVolume behavior](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/storage/disks_and_volumes.md#L530-L609)).
 
-**Observed fact.** Windows는 virtio storage/network driver가 필요하고, KubeVirt는 virtio driver와 QEMU Guest Agent가 들어 있는 containerDisk를 CD-ROM으로 attach하는 경로를 문서화합니다 ([drivers](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/compute/windows_virtio_drivers.md#L6-L29), [installation and containerDisk](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/compute/windows_virtio_drivers.md#L53-L69), [guest tools](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/compute/windows_virtio_drivers.md#L104-L127)). Sysprep answer file은 ConfigMap이나 Secret-backed CD-ROM으로 붙일 수 있고, generalized image는 `/generalize /shutdown /oobe /mode:vm` flow로 만들 수 있습니다 ([Sysprep flow](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/startup_scripts.md#L40-L73), [Secret volume example](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/startup_scripts.md#L847-L903)).
+**Observed fact.** Windows needs virtio storage and network drivers, and KubeVirt documents attaching a containerDisk that carries the virtio drivers and the QEMU Guest Agent as a CD-ROM ([drivers](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/compute/windows_virtio_drivers.md#L6-L29), [installation and containerDisk](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/compute/windows_virtio_drivers.md#L53-L69), [guest tools](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/compute/windows_virtio_drivers.md#L104-L127)). A Sysprep answer file can be attached as a ConfigMap- or Secret-backed CD-ROM, and a generalized image can be produced with the `/generalize /shutdown /oobe /mode:vm` flow ([Sysprep flow](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/startup_scripts.md#L40-L73), [Secret volume example](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/startup_scripts.md#L847-L903)).
 
-**Observed fact.** QEMU Guest Agent는 `AgentConnected` condition, OS/interface/user/filesystem information과 ping readiness를 제공합니다 ([guest information](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/guest_agent_information.md#L1-L24), [API surface](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/guest_agent_information.md#L63-L77), [probe](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/liveness_and_readiness_probes.md#L277-L294)). 이 API에는 screenshot, mouse, keyboard 또는 UI Automation이 없습니다. 따라서 QEMU Guest Agent를 Windows Computer Agent 대신 쓸 수 없습니다.
+**Observed fact.** The QEMU Guest Agent provides the `AgentConnected` condition, OS/interface/user/filesystem information, and ping readiness ([guest information](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/guest_agent_information.md#L1-L24), [API surface](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/guest_agent_information.md#L63-L77), [probe](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/liveness_and_readiness_probes.md#L277-L294)). That API has no screenshot, mouse, keyboard, or UI Automation. The QEMU Guest Agent therefore cannot stand in for the Windows Computer Agent.
 
-### VNC는 production model-control path가 아닙니다
+### VNC is not the production model-control path
 
-**Observed fact.** KubeVirt graphical console은 `virtctl vnc`/proxy로 접근하며, VNC와 screenshot은 Kubernetes-authenticated subresource입니다 ([user guide](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/accessing_virtual_machines.md#L28-L46), [RBAC](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/accessing_virtual_machines.md#L362-L407)). KubeVirt v1.9.0 source도 `virtualmachineinstances/vnc`와 PNG `virtualmachineinstances/vnc/screenshot` route를 구분하며, 기본 VNC request가 기존 session을 drop할 수 있음을 보여 줍니다 ([routes](https://github.com/kubevirt/kubevirt/blob/v1.9.0/pkg/virt-api/api.go#L351-L369), [handler](https://github.com/kubevirt/kubevirt/blob/v1.9.0/pkg/virt-api/rest/vnc.go#L37-L85)). Built-in `edit` role은 VNC/port-forward를 포함하지만 screenshot을 포함하지 않으므로 PoC screenshot에는 explicit `get` RBAC가 필요합니다 ([v1.9.0 RBAC](https://github.com/kubevirt/kubevirt/blob/v1.9.0/pkg/virt-operator/resource/generate/rbac/cluster.go#L421-L446), [screenshot resource](https://github.com/kubevirt/kubevirt/blob/v1.9.0/pkg/virt-operator/resource/generate/rbac/cluster.go#L82-L85)). Port-forward traffic도 Kubernetes control plane을 통과하며, 고정적인 high-traffic에는 dedicated Service를 쓰라고 문서가 권고합니다 ([access guide](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/accessing_virtual_machines.md#L249-L258), [API-server pressure](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/accessing_virtual_machines.md#L324-L327)).
+**Observed fact.** The KubeVirt graphical console is reached through `virtctl vnc`/proxy, and VNC and screenshot are Kubernetes-authenticated subresources ([user guide](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/accessing_virtual_machines.md#L28-L46), [RBAC](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/accessing_virtual_machines.md#L362-L407)). The KubeVirt v1.9.0 source likewise separates the `virtualmachineinstances/vnc` and PNG `virtualmachineinstances/vnc/screenshot` routes, and shows that a default VNC request can drop an existing session ([routes](https://github.com/kubevirt/kubevirt/blob/v1.9.0/pkg/virt-api/api.go#L351-L369), [handler](https://github.com/kubevirt/kubevirt/blob/v1.9.0/pkg/virt-api/rest/vnc.go#L37-L85)). The built-in `edit` role includes VNC and port-forward but not screenshot, so the PoC screenshot needs explicit `get` RBAC ([v1.9.0 RBAC](https://github.com/kubevirt/kubevirt/blob/v1.9.0/pkg/virt-operator/resource/generate/rbac/cluster.go#L421-L446), [screenshot resource](https://github.com/kubevirt/kubevirt/blob/v1.9.0/pkg/virt-operator/resource/generate/rbac/cluster.go#L82-L85)). Port-forward traffic also passes through the Kubernetes control plane, and the documentation recommends a dedicated Service for sustained high traffic ([access guide](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/accessing_virtual_machines.md#L249-L258), [API-server pressure](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/accessing_virtual_machines.md#L324-L327)).
 
-**PoC option.** 가장 빠른 feasibility spike는 narrow helper가 authenticated `/vnc` WebSocket을 열고 RFB framebuffer, `KeyEvent`, `PointerEvent`를 같은 connection에서 처리하는 방식입니다 ([RFB protocol](https://datatracker.ietf.org/doc/html/rfc6143)). `/vnc/screenshot`은 diagnostic proof로만 사용합니다. VNC로 본 console frame에 RDP session input을 보내면 서로 다른 Windows session/display를 조작할 수 있으므로 screen과 input transport를 섞지 않습니다 ([Microsoft console/session distinction](https://learn.microsoft.com/en-us/windows/win32/termserv/consoles-vs-terminals)). 이 spike는 Kubernetes-authenticated helper이므로 production TypeClaw data path가 아닙니다.
+**PoC option.** The fastest feasibility spike is a narrow helper that opens the authenticated `/vnc` WebSocket and handles the RFB framebuffer, `KeyEvent`, and `PointerEvent` on the same connection ([RFB protocol](https://datatracker.ietf.org/doc/html/rfc6143)). `/vnc/screenshot` is used only as diagnostic proof. Sending RDP session input against a console frame seen over VNC can drive a different Windows session or display, so screen and input transports are never mixed ([Microsoft console/session distinction](https://learn.microsoft.com/en-us/windows/win32/termserv/consoles-vs-terminals)). Because this spike is a Kubernetes-authenticated helper, it is not the production TypeClaw data path.
 
-**Recommendation.** `virtctl vnc`와 KubeVirt screenshot은 image bootstrap, administrator debugging, break-glass recovery에만 사용합니다. Production model loop는 guest Computer Agent의 private Service를 사용합니다. 이렇게 해야 TypeClaw plugin이나 high-throughput broker에 Kubernetes credential을 주지 않고, API server를 framebuffer data path로 만들지 않을 수 있습니다.
+**Recommendation.** Use `virtctl vnc` and the KubeVirt screenshot only for image bootstrap, administrator debugging, and break-glass recovery. The production model loop uses the guest Computer Agent's private Service. Only that way is no Kubernetes credential handed to the TypeClaw plugin or to a high-throughput broker, and the API server is not turned into a framebuffer data path.
 
-**Recommendation.** Human viewer는 model control과 별도 capability로 미룹니다. 필요해지면 one-time, short-TTL authorization과 server-enforced view-only를 갖춘 Viewer Gateway를 설계해야 합니다. RDP/VNC `LoadBalancer`를 직접 public exposure하거나 URL query에 reusable password를 넣어서는 안 됩니다.
+**Recommendation.** Defer the human viewer as a capability separate from model control. When it does become necessary, design a Viewer Gateway with one-time short-TTL authorization and server-enforced view-only. An RDP/VNC `LoadBalancer` must never be exposed publicly, and a reusable password must never be placed in a URL query.
 
-## 권장 architecture
+## Recommended architecture
 
 ```text
 TypeClaw Runtime Pod
@@ -146,78 +146,78 @@ KubeVirt Windows VM
        └─ PoC implementation: pinned `winapp ui`
 ```
 
-이 구조에서 component별 권한은 다음과 같습니다.
+The per-component authority in this structure is as follows.
 
-| Component | 가져야 하는 권한 | 가져서는 안 되는 권한 |
+| Component | Authority it must have | Authority it must not have |
 |---|---|---|
-| TypeClaw Platform Extension | 자신의 TypeClaw permission, Broker 호출, current lease handle | Kubernetes API, VNC subresource, arbitrary VM address, Windows admin credential |
-| Sandbox Broker | lease 검증, bounded action forwarding, outcome record | ServiceAccount token, PVC/VM create, Windows shell |
-| Sandbox Reconciler | namespace-scoped KubeVirt/CDI/PVC/Service/NetworkPolicy/Secret lifecycle | model prompt, screenshot bytes, arbitrary tool execution |
-| Windows Computer Agent | 자신의 interactive desktop에서 allowlisted observe/action | Kubernetes token, arbitrary PowerShell/command execution, another lease의 disk/session |
-| Viewer Gateway, 향후 | 별도 viewer grant와 frame stream | agent input 권한; client-side `viewOnly`에 의존하는 authorization |
+| TypeClaw Platform Extension | Its own TypeClaw permissions, Broker calls, the current lease handle | Kubernetes API, VNC subresource, arbitrary VM address, Windows admin credential |
+| Sandbox Broker | Lease verification, bounded action forwarding, outcome records | ServiceAccount token, PVC/VM creation, Windows shell |
+| Sandbox Reconciler | Namespace-scoped KubeVirt/CDI/PVC/Service/NetworkPolicy/Secret lifecycle | Model prompts, screenshot bytes, arbitrary tool execution |
+| Windows Computer Agent | Allowlisted observe/action on its own interactive desktop | Kubernetes token, arbitrary PowerShell/command execution, another lease's disk or session |
+| Viewer Gateway, future | A separate viewer grant and the frame stream | Agent input authority; authorization that relies on client-side `viewOnly` |
 
-### Accepted architecture와의 관계
+### Relationship to the accepted architecture
 
-**Observed fact.** ADR 0001은 RemoteSandbox를 Sandbox Broker data plane과 Kubernetes-facing Sandbox Reconciler control plane으로 분리하고, session-scoped Sandbox Lease, default-deny Network Authority, no live Agent Folder, no Kubernetes credential, durable outcome와 unknown-outcome fail-closed를 요구합니다. 이 문서의 component split은 그 방향을 따릅니다.
+**Observed fact.** ADR 0001 splits RemoteSandbox into a Sandbox Broker data plane and a Kubernetes-facing Sandbox Reconciler control plane, and requires a session-scoped Sandbox Lease, default-deny Network Authority, no live Agent Folder, no Kubernetes credential, durable outcomes, and fail-closed unknown outcomes. The component split in this document follows that direction.
 
-**Gap.** 같은 ADR의 production certification 문구는 sandbox Pod의 gVisor/Kata-class `RuntimeClass`를 요구합니다. KubeVirt Windows는 hardware VM과 `virt-launcher` infrastructure를 사용하므로 이 문구를 충족한다고 간주할 수 없습니다. 다음 중 하나를 accepted ADR로 결정해야 합니다.
+**Gap.** The production certification wording in the same ADR requires a gVisor/Kata-class `RuntimeClass` for the sandbox Pod. KubeVirt Windows uses a hardware VM and the `virt-launcher` infrastructure, so it cannot be counted as satisfying that wording. One of the following has to be decided in an accepted ADR.
 
-1. `RemoteSandbox` security contract를 provider-neutral requirements와 provider-specific certification profile로 일반화합니다.
-2. `WindowsVM`을 별도 Tool Execution Environment로 추가하되 Sandbox Lease와 data/control-plane invariants를 재사용합니다.
+1. Generalize the `RemoteSandbox` security contract into provider-neutral requirements plus a provider-specific certification profile.
+2. Add `WindowsVM` as a separate Tool Execution Environment while reusing the Sandbox Lease and the data/control-plane invariants.
 
-이 문서는 1번을 권장하지만 결정하지 않습니다. Certification에는 cluster-wide privileged KubeVirt components, `virt-launcher` Pod Security/admission tuple, KubeVirt/CDI/CRI version, KVM availability, QEMU/libvirt hardening, node eligibility, storage isolation, CNI NetworkPolicy, guest image/protocol digest, cleanup과 failure evidence가 포함되어야 합니다. TypeClaw Restricted Workload의 PSS 결과와 privileged virtualization infrastructure의 결과를 섞거나 재사용해서는 안 됩니다.
+This document recommends option 1 but does not decide it. Certification has to include the cluster-wide privileged KubeVirt components, the `virt-launcher` Pod Security/admission tuple, the KubeVirt/CDI/CRI versions, KVM availability, QEMU/libvirt hardening, node eligibility, storage isolation, CNI NetworkPolicy, guest image/protocol digests, and cleanup and failure evidence. The PSS result of a TypeClaw Restricted Workload and the result for privileged virtualization infrastructure must never be mixed or reused for each other.
 
-**Gap.** 현재 `NetworkSpec.PublicWeb`는 cluster/private/control-plane destination을 허용하지 않습니다 ([current API](../../api/v1alpha1/typeclawinstance_types.go#L93-L109), [ADR 0002](../adr/0002-spiffe-workload-identity-and-credential-execution.md)). Runtime에서 Broker `ClusterIP`로 통신하려면 `Unrestricted`로 넓히거나 PublicWeb를 오용하지 말고, 정확한 Broker identity/port만 허용하는 dedicated platform-capability egress를 Network Authority에 추가해야 합니다.
+**Gap.** The current `NetworkSpec.PublicWeb` does not allow cluster, private, or control-plane destinations ([current API](../../api/v1alpha1/typeclawinstance_types.go#L93-L109), [ADR 0002](../adr/0002-spiffe-workload-identity-and-credential-execution.md)). To let the runtime reach the Broker `ClusterIP`, do not widen it to `Unrestricted` and do not misuse PublicWeb; add to the Network Authority a dedicated platform-capability egress that allows only the exact Broker identity and port.
 
 ## Windows Computer Agent
 
-### Service와 interactive user process를 분리합니다
+### Separate the service from the interactive user process
 
-**Observed fact.** Microsoft는 Windows Vista 이후 service가 사용자와 직접 상호작용할 수 없으며, interactive user session의 별도 GUI application과 IPC를 사용하라고 안내합니다 ([Interactive Services](https://learn.microsoft.com/en-us/windows/win32/services/interactive-services)).
+**Observed fact.** Microsoft states that since Windows Vista a service cannot interact with the user directly, and advises using a separate GUI application in the interactive user session together with IPC ([Interactive Services](https://learn.microsoft.com/en-us/windows/win32/services/interactive-services)).
 
-**Recommendation.** VM에는 두 process role을 둡니다.
+**Recommendation.** Keep two process roles in the VM.
 
-- Windows service는 boot health, SPIRE Agent coordination, session-agent supervision, update/termination 신호만 처리합니다.
-- 실제 screenshot, UI Automation과 input injection은 restricted automation user의 interactive session에서 실행되는 Computer Agent가 처리합니다.
-- 둘 사이는 ACL이 걸린 named pipe 같은 local IPC를 사용합니다. Service를 `LocalSystem` interactive process로 만들거나 session 0에서 UI를 조작하지 않습니다.
+- The Windows service handles only boot health, SPIRE Agent coordination, session-agent supervision, and update/termination signals.
+- The actual screenshot, UI Automation, and input injection are handled by the Computer Agent running in the interactive session of a restricted automation user.
+- Between the two, use local IPC such as an ACL-protected named pipe. Never make the service a `LocalSystem` interactive process and never drive the UI from session 0.
 
-**Assumption requiring proof.** 각 lease에 unlocked interactive desktop을 어떻게 안전하게 만들고 유지할지는 아직 결정되지 않았습니다. PoC는 disposable local automation account의 controlled autologon을 사용할 수 있지만, production은 password storage, rotation, session unlock, crash recovery와 human takeover policy를 별도로 threat-model해야 합니다. Golden image에 shared password를 bake해서는 안 됩니다.
+**Assumption requiring proof.** How to create and hold an unlocked interactive desktop safely for each lease is not decided yet. The PoC may use a controlled autologon of a disposable local automation account, but production has to threat-model password storage, rotation, session unlock, crash recovery, and the human takeover policy separately. A shared password must never be baked into the golden image.
 
-### PoC implementation으로 `winapp ui`를 감쌉니다
+### Wrap `winapp ui` as the PoC implementation
 
-**Observed fact.** Microsoft `winapp ui`는 UI Automation을 사용해 WPF, WinForms, Win32, Electron, WinUI 3 application을 inspect/search하고, `invoke`, `set-value`, `wait-for`, screenshot과 input action을 제공합니다 ([overview](https://github.com/microsoft/winappCli/blob/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a/docs/ui-automation.md#L4-L15), [screenshot](https://github.com/microsoft/winappCli/blob/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a/docs/ui-automation.md#L225-L241), [keyboard and values](https://github.com/microsoft/winappCli/blob/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a/docs/ui-automation.md#L399-L452)). Screenshot은 기본적으로 Windows.Graphics.Capture를 사용하고 unavailable하면 PrintWindow로 fallback하며, screen capture mode도 있습니다.
+**Observed fact.** Microsoft `winapp ui` uses UI Automation to inspect and search WPF, WinForms, Win32, Electron, and WinUI 3 applications, and provides `invoke`, `set-value`, `wait-for`, screenshot, and input actions ([overview](https://github.com/microsoft/winappCli/blob/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a/docs/ui-automation.md#L4-L15), [screenshot](https://github.com/microsoft/winappCli/blob/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a/docs/ui-automation.md#L225-L241), [keyboard and values](https://github.com/microsoft/winappCli/blob/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a/docs/ui-automation.md#L399-L452)). Screenshots use Windows.Graphics.Capture by default, fall back to PrintWindow when it is unavailable, and a screen capture mode also exists.
 
-**Observed fact.** Mouse/keyboard injection verb는 unlocked foreground desktop을 요구합니다. Locked workstation, LogonUI/UAC secure desktop에서는 `no_interactive_desktop`으로 실패하고, animation 중 target이 움직이면 `target_moved`로 거절할 수 있습니다. UIA pattern verb는 가능한 경우 real input injection보다 안전합니다 ([interactive requirement](https://github.com/microsoft/winappCli/blob/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a/docs/ui-automation.md#L11-L15), [click/drag safety](https://github.com/microsoft/winappCli/blob/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a/docs/ui-automation.md#L304-L337)). Windows `SendInput` 자체도 UIPI 제약을 받습니다 ([Microsoft API](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)).
+**Observed fact.** The mouse and keyboard injection verbs require an unlocked foreground desktop. On a locked workstation or the LogonUI/UAC secure desktop they fail with `no_interactive_desktop`, and they may refuse with `target_moved` when the target moves during an animation. Where they apply, UIA pattern verbs are safer than real input injection ([interactive requirement](https://github.com/microsoft/winappCli/blob/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a/docs/ui-automation.md#L11-L15), [click/drag safety](https://github.com/microsoft/winappCli/blob/fd7cb6f235fa54dd2c6e26386e65e967a2c8797a/docs/ui-automation.md#L304-L337)). Windows `SendInput` itself is also subject to UIPI restrictions ([Microsoft API](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)).
 
-**Recommendation.** PoC Computer Agent는 arbitrary command line을 받아 실행하지 않습니다. Stable RPC action을 allowlisted `winapp ui --json` command로 compile하고, timeout, output schema, target process/window, image size를 검증합니다. UIA `invoke`/`set-value`를 우선하고 pixel click/type은 fallback으로 둡니다.
+**Recommendation.** The PoC Computer Agent never accepts and runs an arbitrary command line. It compiles stable RPC actions into allowlisted `winapp ui --json` commands and validates the timeout, output schema, target process/window, and image size. Prefer UIA `invoke`/`set-value` and keep pixel click and type as the fallback.
 
-**Production gate.** `winapp`은 Public Preview입니다. Golden image에는 actual `v0.5.0` release artifact의 version, SHA-256, signature를 pin해야 하고, pinned release documentation과 installed binary의 verb/error behavior가 같은지 conformance test로 증명해야 합니다. External contract는 project-owned versioned RPC여야 하므로 향후 native UIA/WGC agent로 교체해도 TypeClaw tool contract가 바뀌지 않아야 합니다.
+**Production gate.** `winapp` is a Public Preview. The golden image has to pin the version, SHA-256, and signature of the actual `v0.5.0` release artifact, and a conformance test has to prove that the verb and error behavior of the installed binary matches the pinned release documentation. The external contract has to be a project-owned versioned RPC, so that replacing it later with a native UIA/WGC agent does not change the TypeClaw tool contract.
 
-## Tool과 wire protocol contract
+## Tool and wire protocol contract
 
 ### Model-facing tools
 
-권장 model-facing surface는 두 tool뿐입니다. TypeClaw `ToolContext.sessionId`를 Broker의 Sandbox Lease에 lazy-bind하면 model이 lease ID, VM ID, TTL, persistence나 release semantics를 조작할 이유가 없습니다.
+The recommended model-facing surface is only two tools. Lazy-binding TypeClaw's `ToolContext.sessionId` to the Broker's Sandbox Lease leaves the model no reason to manipulate the lease ID, VM ID, TTL, persistence, or release semantics.
 
-| Tool | 주요 input | result |
+| Tool | Main input | Result |
 |---|---|---|
-| `computer_observe` | optional window/region과 bounded rendition preference | model-visible text metadata + bounded image content |
-| `computer_act` | `expectedFrameId`, bounded ordered `actions[]`, deadline | model-visible terminal outcome, completed action index, warnings와 새 frame metadata |
+| `computer_observe` | Optional window/region and a bounded rendition preference | Model-visible text metadata plus bounded image content |
+| `computer_act` | `expectedFrameId`, a bounded ordered `actions[]`, a deadline | Model-visible terminal outcome, completed action index, warnings, and new frame metadata |
 
-첫 `computer_observe`에서 plugin은 자신의 `sessionId`로 Broker의 internal `ensureSession`을 호출합니다. Broker는 policy가 허용하면 lease를 만들거나 기존 session binding을 반환합니다. `computer_act`도 같은 binding만 사용할 수 있으므로 model-supplied identifier로 다른 VM을 선택할 수 없습니다. Session end/idle TTL이 release를 시작하고, reset/delete/retain은 policy 또는 administrator control-plane operation으로 분리합니다. Destructive desktop reset을 ordinary model tool로 두지 않습니다.
+On the first `computer_observe` the plugin calls the Broker's internal `ensureSession` with its own `sessionId`. If policy allows, the Broker creates a lease or returns the existing session binding. `computer_act` can use only that same binding, so a model-supplied identifier cannot select a different VM. Session end or an idle TTL starts the release, while reset, delete, and retain are separated into policy or administrator control-plane operations. A destructive desktop reset is never left as an ordinary model tool.
 
-TypeClaw의 `ToolResult.details`와 MCP `structuredContent`를 model-visible contract로 사용하면 안 됩니다. `frameId`, width, height, DPI, screen revision, active window와 bounded UIA summary는 image 앞의 **text content에도 반드시 포함**해야 합니다. `details`에는 adapter diagnostics를 중복 기록할 수 있지만 model action이 그것에 의존해서는 안 됩니다.
+TypeClaw's `ToolResult.details` and MCP `structuredContent` must not be used as the model-visible contract. `frameId`, width, height, DPI, screen revision, the active window, and a bounded UIA summary **must also be included in the text content** ahead of the image. `details` may duplicate adapter diagnostics, but no model action may depend on them.
 
-첫 PoC의 action allowlist는 이 정도면 충분합니다.
+The following action allowlist is enough for the first PoC.
 
 - `uia.invoke`, `uia.setValue`, `uia.waitFor`.
 - `mouse.move`, `mouse.click`, `mouse.drag`, `mouse.scroll`.
 - `keyboard.key`, `keyboard.chord`, `keyboard.type`.
 - `wait` with a strict maximum.
 
-Clipboard, arbitrary process launch, PowerShell, file upload/download, microphone, camera, USB, multi-monitor, registry와 Windows setting 변경은 첫 PoC에서 제외합니다. Application launch가 꼭 필요하면 administrator-configured allowlist의 application ID만 별도 action으로 추가합니다.
+Clipboard, arbitrary process launch, PowerShell, file upload/download, microphone, camera, USB, multi-monitor, registry, and Windows setting changes are excluded from the first PoC. If application launch is genuinely required, add only application IDs from an administrator-configured allowlist as a separate action.
 
-Model이 plugin에 보내는 예시 argument는 다음과 같습니다.
+An example of the arguments the model sends to the plugin follows.
 
 ```json
 {
@@ -233,77 +233,77 @@ Model이 plugin에 보내는 예시 argument는 다음과 같습니다.
 }
 ```
 
-Plugin은 이 call을 Broker에 보낼 때 bound `leaseId`와 새 `invocationId`를 내부적으로 추가합니다. Pixel fallback은 fixed native coordinate를 사용하며 `screenRevision`, width, height, DPI를 model-visible text metadata에 넣습니다. `expectedFrameId`는 stale-frame action을 줄이는 optimistic fence이지, 비동기 UI에 대한 exact serialization 보장은 아닙니다.
+When the plugin forwards this call to the Broker it internally adds the bound `leaseId` and a new `invocationId`. The pixel fallback uses fixed native coordinates and puts `screenRevision`, width, height, and DPI into the model-visible text metadata. `expectedFrameId` is an optimistic fence that reduces stale-frame actions, not a guarantee of exact serialization against an asynchronous UI.
 
-### Outcome와 retry
+### Outcome and retry
 
-Wire protocol은 최소한 다음 terminal outcome을 구분해야 합니다.
+The wire protocol has to distinguish at least the following terminal outcomes.
 
-| Outcome | 의미 | Caller behavior |
+| Outcome | Meaning | Caller behavior |
 |---|---|---|
-| `Succeeded` | Guest가 action과 bounded verification을 완료함 | 새 frame을 observe하고 진행 |
-| `Rejected` | lease/frame/action/policy가 dispatch 전에 거절됨 | request를 수정할 수 있음 |
-| `FailedBeforeDispatch` | guest에 side effect를 보내기 전에 실패함 | 같은 logical intent를 새 invocation으로 재평가 가능 |
-| `CancelledBeforeDispatch` | TypeClaw `AbortSignal`이 dispatch 전에 취소함 | side effect 없음 |
-| `UnknownOutcome` | dispatch 뒤 connection loss, timeout, guest crash 또는 cancellation이 발생함 | 동일 click/type을 자동 replay하지 말고 re-observe와 사용자/policy 결정을 요구 |
+| `Succeeded` | The guest completed the action and the bounded verification | Observe a new frame and continue |
+| `Rejected` | The lease, frame, action, or policy was refused before dispatch | The request may be corrected |
+| `FailedBeforeDispatch` | It failed before any side effect reached the guest | The same logical intent may be re-evaluated as a new invocation |
+| `CancelledBeforeDispatch` | The TypeClaw `AbortSignal` cancelled before dispatch | No side effect |
+| `UnknownOutcome` | Connection loss, timeout, guest crash, or cancellation occurred after dispatch | Do not replay the same click or type automatically; require a re-observe and a user or policy decision |
 
-`invocationId`는 guest가 받은 exact duplicate를 deduplicate하는 데 사용합니다. 하지만 crash가 side effect와 durable record 사이에 발생할 수 있으므로 exactly-once를 주장하지 않습니다. 이는 ADR 0001/0002의 unknown-outcome와 no-replay 원칙을 Windows UI action에도 적용한 것입니다.
+`invocationId` is used to deduplicate an exact duplicate that reaches the guest. Because a crash can occur between the side effect and the durable record, however, exactly-once is not claimed. This applies the unknown-outcome and no-replay principles of ADR 0001/0002 to Windows UI actions as well.
 
 ### Wire-level requirements
 
-- Protocol은 versioned HTTPS/HTTP2, Connect 또는 gRPC 중 하나로 구현할 수 있지만, schema와 error enum은 transport와 독립적으로 versioning합니다.
-- Broker와 guest는 SPIFFE X.509-SVID 기반 mTLS를 production minimum으로 사용합니다.
-- 모든 request는 lease ID, invocation ID, deadline, maximum action count와 maximum response bytes를 가집니다.
-- Broker는 expected VM SPIFFE ID, Sandbox Lease, Security Epoch와 guest image/protocol digest를 함께 검증합니다.
-- Screenshot, UI tree와 error output은 bounded합니다. Guest stdout/stderr나 `winapp` raw output을 그대로 model transcript에 넣지 않습니다.
-- Health와 `Capabilities`는 `winapp`/agent version, supported verbs, display geometry, active session state를 보고하지만 secret이나 Windows username을 불필요하게 노출하지 않습니다.
+- The protocol may be implemented over versioned HTTPS/HTTP2, Connect, or gRPC, but the schema and error enum are versioned independently of the transport.
+- The Broker and the guest use SPIFFE X.509-SVID-based mTLS as the production minimum.
+- Every request carries a lease ID, an invocation ID, a deadline, a maximum action count, and maximum response bytes.
+- The Broker verifies the expected VM SPIFFE ID, the Sandbox Lease, the Security Epoch, and the guest image/protocol digest together.
+- Screenshots, the UI tree, and error output are bounded. Guest stdout/stderr and raw `winapp` output never go into the model transcript as-is.
+- Health and `Capabilities` report the `winapp`/agent version, supported verbs, display geometry, and active session state, but do not expose secrets or the Windows username unnecessarily.
 
-## Golden image와 per-lease bootstrap
+## Golden image and per-lease bootstrap
 
 ### Cluster prerequisites
 
-KubeVirt와 CDI는 TypeClaw operator가 자동 설치할 application dependency가 아니라 cluster-admin이 설치하고 certify하는 infrastructure로 취급해야 합니다. 최소 prerequisite는 다음과 같습니다.
+KubeVirt and CDI have to be treated as infrastructure that a cluster admin installs and certifies, not as an application dependency the TypeClaw operator installs automatically. The minimum prerequisites are as follows.
 
-- Worker BIOS/nested virtualization과 `/dev/kvm` availability.
-- KubeVirt와 compatible CDI version.
-- ISO import를 위한 scratch-capable StorageClass.
-- golden PVC clone 또는 CSI VolumeSnapshot/clone을 지원하는 storage.
-- VMI pod에 실제로 적용되는 CNI NetworkPolicy.
-- Windows VM resource quota와 충분한 node capacity.
+- Worker BIOS/nested virtualization and `/dev/kvm` availability.
+- KubeVirt and a compatible CDI version.
+- A scratch-capable StorageClass for ISO import.
+- Storage that supports golden PVC cloning or CSI VolumeSnapshot/clone.
+- A CNI NetworkPolicy that actually applies to the VMI pod.
+- Windows VM resource quota and sufficient node capacity.
 
-Talos v1.13의 공식 guide도 BIOS virtualization, CDI scratch storage, 그리고 live migration을 사용할 경우 shared storage를 별도 prerequisite로 둡니다 ([Talos KubeVirt guide](https://docs.siderolabs.com/talos/v1.13/advanced-guides/install-kubevirt)). 따라서 Talos 자체는 blocker가 아니지만, ADR 0006의 homelab target에서 이 항목은 canary로 실측해야 합니다.
+The official Talos v1.13 guide likewise lists BIOS virtualization, CDI scratch storage, and — when live migration is used — shared storage as separate prerequisites ([Talos KubeVirt guide](https://docs.siderolabs.com/talos/v1.13/advanced-guides/install-kubevirt)). Talos itself is therefore not a blocker, but on the homelab target of ADR 0006 these items have to be measured with a canary.
 
 ### Image build sequence
 
-1. Customer-supplied, licensed Windows ISO를 CDI DataVolume로 upload/import합니다. Operator repository나 public registry가 Windows golden disk를 재배포하지 않습니다.
-2. Blank OS DataVolume, Windows ISO, digest-pinned virtio-win containerDisk, Secret-backed Sysprep media를 attach합니다.
-3. Image-builder VM은 `RerunOnFailure`를 사용합니다. KubeVirt에서 `Always`는 정상 guest shutdown도 respawn하지만 `RerunOnFailure`는 controlled shutdown을 존중합니다 ([run strategies](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/compute/run_strategies.md#L14-L49)).
-4. Unattended setup은 matching storage/network driver, QEMU Guest Agent, signed Computer Agent, pinned `winapp`, SPIRE Agent, browser/application과 fixed display/DPI setting을 설치합니다.
-5. Computer Agent protocol conformance, Defender scan, signature/hash, OS patch level과 clean-shutdown을 검증합니다.
-6. `sysprep /generalize /oobe /shutdown /mode:vm`으로 seal합니다. KubeVirt official sample은 driver와 Guest Agent install 뒤 이 flow를 보여 줍니다 ([post-install example](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/startup_scripts.md#L1062-L1080)).
-7. Sealed PVC 또는 VolumeSnapshot을 golden source로 publish하고 Windows build, update level, virtio image digest, Computer Agent digest, `winapp` version/hash, protocol version과 Security Epoch metadata를 기록합니다.
+1. Upload or import a customer-supplied, licensed Windows ISO into a CDI DataVolume. Neither the operator repository nor a public registry redistributes a Windows golden disk.
+2. Attach a blank OS DataVolume, the Windows ISO, a digest-pinned virtio-win containerDisk, and Secret-backed Sysprep media.
+3. The image-builder VM uses `RerunOnFailure`. In KubeVirt, `Always` respawns even a normal guest shutdown, while `RerunOnFailure` respects a controlled shutdown ([run strategies](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/compute/run_strategies.md#L14-L49)).
+4. The unattended setup installs matching storage and network drivers, the QEMU Guest Agent, the signed Computer Agent, the pinned `winapp`, the SPIRE Agent, the browser and applications, and fixed display/DPI settings.
+5. Verify Computer Agent protocol conformance, a Defender scan, signatures and hashes, the OS patch level, and a clean shutdown.
+6. Seal with `sysprep /generalize /oobe /shutdown /mode:vm`. The official KubeVirt sample shows this flow after the driver and Guest Agent installation ([post-install example](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/startup_scripts.md#L1062-L1080)).
+7. Publish the sealed PVC or VolumeSnapshot as the golden source and record the Windows build, update level, virtio image digest, Computer Agent digest, `winapp` version and hash, protocol version, and Security Epoch metadata.
 
-KubeVirt sample의 `<EnableLUA>false>`와 plaintext Administrator password는 production template로 복사하면 안 됩니다 ([insecure sample lines](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/startup_scripts.md#L1000-L1045)). UAC는 유지하고, image build에 필요한 elevation은 model session 전에 끝냅니다.
+The KubeVirt sample's `<EnableLUA>false>` and plaintext Administrator password must not be copied into a production template ([insecure sample lines](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/startup_scripts.md#L1000-L1045)). Keep UAC enabled and finish whatever elevation the image build needs before the model session.
 
-KubeVirt Tekton task repository에는 EFI Windows installer와 customization pipeline 예제가 있으므로 manual bootstrap이 안정되면 image pipeline의 출발점으로 사용할 수 있습니다 ([official task guide](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/cluster_admin/tekton_tasks.md#L45-L57)).
+The KubeVirt Tekton task repository has EFI Windows installer and customization pipeline examples, so once the manual bootstrap is stable it can serve as the starting point for an image pipeline ([official task guide](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/cluster_admin/tekton_tasks.md#L45-L57)).
 
 ### Per-lease clone
 
-Sandbox Reconciler는 lease마다 다음 resource를 만듭니다.
+The Sandbox Reconciler creates the following resources per lease.
 
-1. Golden source에서 새 OS DataVolume/PVC를 clone합니다.
-2. Fresh VM name, lease labels, one automation user/session, ephemeral identity bootstrap material을 생성합니다.
-3. `Manual` run strategy VM, private ClusterIP Service, default-deny ingress/egress NetworkPolicy와 resource quota를 만듭니다. KubeVirt는 VMI label을 launcher Pod에 전달하므로 Service와 NetworkPolicy selector로 사용할 수 있습니다 ([Service](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/network/service_objects.md#L1-L12), [ClusterIP example](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/network/service_objects.md#L15-L82), [NetworkPolicy](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/network/networkpolicy.md#L1-L18)).
-4. VM을 explicit start하고 multi-signal readiness를 기다립니다.
-5. Release에서는 먼저 action authority와 network grant를 revoke하고 VM을 stop한 뒤 Service, bootstrap Secret과 disposable PVC를 cleanup합니다. Durable outcome 기록은 cleanup과 독립적으로 남깁니다.
+1. Clone a new OS DataVolume/PVC from the golden source.
+2. Generate a fresh VM name, lease labels, one automation user and session, and ephemeral identity bootstrap material.
+3. Create a `Manual` run strategy VM, a private ClusterIP Service, a default-deny ingress/egress NetworkPolicy, and a resource quota. KubeVirt propagates VMI labels to the launcher Pod, so they can be used as Service and NetworkPolicy selectors ([Service](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/network/service_objects.md#L1-L12), [ClusterIP example](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/network/service_objects.md#L15-L82), [NetworkPolicy](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/network/networkpolicy.md#L1-L18)).
+4. Start the VM explicitly and wait for multi-signal readiness.
+5. On release, first revoke the action authority and the network grant, then stop the VM, then clean up the Service, the bootstrap Secret, and the disposable PVC. Durable outcome records are kept independently of the cleanup.
 
-Default persistence는 `Disposable`이어야 합니다. `RetainedDesktop`이 필요하면 disk를 같은 TypeClaw Instance에 영구 귀속하고 다른 tenant/lease에 재할당하지 않습니다. 중단된 VM의 PVC를 보존하는 것은 E2B memory snapshot resume와 같은 semantics가 아니며 startup latency를 다시 측정해야 합니다.
+The default persistence has to be `Disposable`. If `RetainedDesktop` is needed, the disk is bound permanently to the same TypeClaw Instance and never reassigned to another tenant or lease. Preserving the PVC of a halted VM does not carry the same semantics as an E2B memory snapshot resume, and startup latency has to be measured again.
 
-KubeVirt ephemeral volume은 VM stop 시 local COW를 버리지만 backing PVC와 node-local behavior에 제약이 있습니다 ([ephemeral volumes](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/storage/disks_and_volumes.md#L655-L669)). 첫 implementation은 lifecycle이 명확한 per-lease DataVolume clone을 권장합니다.
+A KubeVirt ephemeral volume discards its local COW when the VM stops, but it has constraints around the backing PVC and node-local behavior ([ephemeral volumes](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/storage/disks_and_volumes.md#L655-L669)). The first implementation is recommended to use a per-lease DataVolume clone whose lifecycle is unambiguous.
 
 ### Readiness state machine
 
-`VMI Running`만으로 lease를 Active로 바꾸면 안 됩니다. 권장 state는 다음과 같습니다.
+A lease must not be moved to Active on `VMI Running` alone. The recommended states are as follows.
 
 ```text
 Requested → Provisioning → Booting → GuestAgentConnected
@@ -312,203 +312,203 @@ Requested → Provisioning → Booting → GuestAgentConnected
                                   ↘ Failed
 ```
 
-`Active` 조건은 모두 충족해야 합니다.
+Every `Active` condition has to be met.
 
-- VMI가 Running이고 expected golden-image identity를 사용합니다.
-- QEMU `AgentConnected`와 guest ping이 성공합니다.
-- Windows interactive session이 unlocked이며 fixed display geometry가 적용됐습니다.
-- Computer Agent가 expected SPIFFE identity로 mTLS handshake하고 protocol/capability version이 맞습니다.
-- Test observe가 bounded image를 반환하고 no-op/UIA health action이 성공합니다.
+- The VMI is Running and uses the expected golden-image identity.
+- QEMU `AgentConnected` and the guest ping succeed.
+- The Windows interactive session is unlocked and the fixed display geometry is applied.
+- The Computer Agent completes the mTLS handshake with the expected SPIFFE identity and the protocol and capability versions match.
+- A test observe returns a bounded image and a no-op/UIA health action succeeds.
 
-Windows update처럼 Guest Agent가 잠시 사라지는 작업 중 liveness probe가 launcher Pod를 재시작하면 VM 자체가 파괴될 수 있습니다. KubeVirt도 long Windows update에서 probe pause가 필요하다고 명시합니다 ([probe maintenance warning](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/liveness_and_readiness_probes.md#L371-L392)). Production은 in-session uncontrolled update 대신 golden image rebuild와 maintenance policy를 사용해야 합니다.
+During work in which the Guest Agent disappears briefly, such as a Windows update, a liveness probe that restarts the launcher Pod can destroy the VM itself. KubeVirt states explicitly that a probe pause is needed during a long Windows update ([probe maintenance warning](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/user_workloads/liveness_and_readiness_probes.md#L371-L392)). Production has to use golden image rebuilds and a maintenance policy instead of uncontrolled in-session updates.
 
-## SPIFFE identity 후보
+## SPIFFE identity candidate
 
-**Observed fact.** SPIRE Agent v1.15.3는 Windows service로 실행할 수 있고 Windows에서 Workload API named pipe를 제공합니다. Join token file과 bootstrap trust bundle path도 구성할 수 있습니다 ([agent configuration](https://github.com/spiffe/spire/blob/v1.15.3/doc/spire_agent.md#L53-L87), [Windows service](https://github.com/spiffe/spire/blob/v1.15.3/doc/spire_agent.md#L324-L335)). `windows` workload attestor는 caller process access token에서 user/group SID를 만들며, 선택적으로 executable path와 SHA-256 selector를 제공합니다 ([Windows workload attestor](https://github.com/spiffe/spire/blob/v1.15.3/doc/plugin_agent_workloadattestor_windows.md#L1-L28)).
+**Observed fact.** SPIRE Agent v1.15.3 can run as a Windows service and provides the Workload API named pipe on Windows. A join token file and a bootstrap trust bundle path are configurable as well ([agent configuration](https://github.com/spiffe/spire/blob/v1.15.3/doc/spire_agent.md#L53-L87), [Windows service](https://github.com/spiffe/spire/blob/v1.15.3/doc/spire_agent.md#L324-L335)). The `windows` workload attestor derives user and group SIDs from the caller process access token, and optionally provides executable path and SHA-256 selectors ([Windows workload attestor](https://github.com/spiffe/spire/blob/v1.15.3/doc/plugin_agent_workloadattestor_windows.md#L1-L28)).
 
-**Candidate design, not an established fact.** Golden image에 private key, node identity나 reusable join token을 bake하지 않습니다. Reconciler가 lease별 one-use, 최대 600초 bootstrap material과 trust bundle을 Secret-backed setup media로 주입하고, explicit expected agent ID로 registration한 뒤 Windows service의 SPIRE Agent가 attestation하도록 prototype합니다. User-session Computer Agent는 named-pipe Workload API에서 X.509-SVID를 받아 Broker와 mTLS를 맺습니다. Registration은 attested VM parent identity와 signed agent path/hash 및 restricted user SID를 bind해야 합니다.
+**Candidate design, not an established fact.** No private key, node identity, or reusable join token is baked into the golden image. Prototype it so that the Reconciler injects per-lease one-use bootstrap material valid for at most 600 seconds, together with the trust bundle, through Secret-backed setup media, registers with an explicit expected agent ID, and then lets the SPIRE Agent running as a Windows service attest. The user-session Computer Agent receives an X.509-SVID from the named-pipe Workload API and establishes mTLS with the Broker. The registration has to bind the attested VM parent identity, the signed agent path and hash, and the restricted user SID.
 
-SPIRE `join_token`은 one-time pre-shared key입니다 ([join-token attestor](https://github.com/spiffe/spire/blob/v1.15.3/doc/plugin_agent_nodeattestor_jointoken.md#L1-L8)). 그 token의 possession은 특정 KubeVirt VMI에서 실행 중이라는 증거가 아닙니다. 따라서 join token만으로 production VMI identity를 주장할 수 없고, KubeVirt guest용 node-attestation profile과 explicit VMI/lease binding은 새 ADR와 certification에서 해결해야 합니다.
+A SPIRE `join_token` is a one-time pre-shared key ([join-token attestor](https://github.com/spiffe/spire/blob/v1.15.3/doc/plugin_agent_nodeattestor_jointoken.md#L1-L8)). Possession of that token is not evidence of running on a particular KubeVirt VMI. A join token alone therefore cannot assert a production VMI identity, and both a node-attestation profile for KubeVirt guests and an explicit VMI/lease binding have to be settled in a new ADR and certification.
 
-다음 항목은 반드시 실증해야 합니다.
+The following items must be demonstrated.
 
-- KubeVirt Windows guest에서 선택한 node attestor와 SPIRE Server route가 정상 동작하는가.
-- Sysprep/clone 뒤 달라지는 machine/user SID를 registration에 어떻게 bind하는가.
-- Interactive user process가 named pipe를 통해 기대한 selectors와 X.509-SVID를 받는가.
-- Higher-integrity process attestation에 필요한 Windows privilege가 최소화되는가.
-- Join material이 한 번만 소비되고 Secret, setup media, guest file와 logs에서 제거되는가.
-- Kubernetes Secret 삭제가 이미 생성된 setup ISO나 guest cache의 secure erasure를 보장하지 않으므로, token consumption 뒤 guest file 삭제, media detach, token revoke와 lease disk destruction을 각각 검증하는가.
-- Lease release 시 SPIRE node/registration entry와 issued authority를 revoke하고, stale agent ID가 reconnect하지 못하는가.
-- Guest clone이나 stolen disk가 다른 Sandbox Lease에서 재-attest할 수 없는가.
+- Whether the chosen node attestor and the SPIRE Server route work correctly on a KubeVirt Windows guest.
+- How the machine and user SIDs that change after Sysprep/clone are bound into the registration.
+- Whether the interactive user process receives the expected selectors and X.509-SVID through the named pipe.
+- Whether the Windows privileges needed for higher-integrity process attestation are minimized.
+- Whether the join material is consumed exactly once and removed from the Secret, the setup media, guest files, and logs.
+- Whether — given that deleting a Kubernetes Secret does not guarantee secure erasure of an already-created setup ISO or guest cache — guest file deletion, media detach, token revocation, and lease disk destruction after token consumption are each verified.
+- Whether lease release revokes the SPIRE node/registration entry and the issued authority, and a stale agent ID cannot reconnect.
+- Whether a guest clone or a stolen disk cannot re-attest under a different Sandbox Lease.
 
-이 검증 전에는 “SPIRE를 설치했으므로 guest identity가 해결됐다”고 기록하면 안 됩니다. PoC 초기는 short-lived, per-lease test certificate를 쓸 수 있지만 production 승격에는 ADR 0002의 SPIFFE identity와 no-fallback contract가 적용됩니다.
+Before that verification nothing may be recorded as “guest identity is solved because SPIRE is installed”. The early PoC may use short-lived per-lease test certificates, but promotion to production is governed by ADR 0002's SPIFFE identity and no-fallback contract.
 
 ## Security model
 
-### Network와 Kubernetes authority
+### Network and Kubernetes authority
 
-- TypeClaw plugin, Broker, Windows guest에는 ServiceAccount token이나 kubeconfig를 넣지 않습니다.
-- Sandbox Reconciler는 dedicated ServiceAccount와 namespace/provider-specific minimal RBAC를 사용합니다. Current manager RBAC에 KubeVirt cluster-wide authority를 단순 추가하기보다 separate deployment/identity가 blast radius를 줄입니다.
-- VMI에는 default-deny NetworkPolicy를 적용하고 Broker→Computer Agent, guest→SPIRE와 administrator-approved public destinations만 허용합니다. KubeVirt도 VMI가 기본적으로 다른 endpoint에서 접근 가능하므로 NetworkPolicy가 필요하다고 명시합니다 ([KubeVirt NetworkPolicy](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/network/networkpolicy.md#L1-L18)).
-- Domain allowlist, DNS rebinding, redirect와 CONNECT/SNI enforcement는 NetworkPolicy가 아니라 ADR 0002의 Network Authority가 담당합니다. Adapter가 없거나 inexact하면 networked capability를 unavailable로 둡니다.
-- RDP 3389, KubeVirt VNC와 Computer Agent port를 NodePort/LoadBalancer로 public expose하지 않습니다.
+- No ServiceAccount token and no kubeconfig goes into the TypeClaw plugin, the Broker, or the Windows guest.
+- The Sandbox Reconciler uses a dedicated ServiceAccount and namespace/provider-specific minimal RBAC. A separate deployment and identity reduces the blast radius more than simply adding cluster-wide KubeVirt authority to the current manager RBAC.
+- Apply a default-deny NetworkPolicy to the VMI and allow only Broker→Computer Agent, guest→SPIRE, and administrator-approved public destinations. KubeVirt itself states that a VMI is reachable from other endpoints by default and therefore needs a NetworkPolicy ([KubeVirt NetworkPolicy](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/network/networkpolicy.md#L1-L18)).
+- Domain allowlisting, DNS rebinding, redirects, and CONNECT/SNI enforcement are the job of ADR 0002's Network Authority, not of NetworkPolicy. When the adapter is absent or inexact, the networked capability is left unavailable.
+- RDP 3389, KubeVirt VNC, and the Computer Agent port are never exposed publicly through NodePort or LoadBalancer.
 
-### Action과 desktop authority
+### Action and desktop authority
 
-- 한 Active Sandbox Lease만 한 Windows interactive desktop의 input authority를 가집니다.
-- Human takeover가 필요하면 agent input grant를 먼저 revoke합니다. Concurrent agent/human input은 지원하지 않습니다.
-- Lock workstation, UAC secure desktop, Ctrl+Alt+Delete/SAS와 elevation prompt는 `Unavailable`로 실패시킵니다. UAC disable이나 secure desktop automation fallback을 두지 않습니다.
-- UIA selector를 pixel coordinate보다 우선하지만, selector와 active window도 action 직전에 re-resolve합니다.
-- Fixed resolution/DPI를 Security Epoch-compatible image contract로 다루고 drift가 생기면 기존 frame을 거절합니다.
-- Guest RPC에는 raw `cmd.exe`, PowerShell, arbitrary binary path나 arbitrary `winapp` arguments를 노출하지 않습니다.
+- Only one Active Sandbox Lease holds the input authority of one Windows interactive desktop.
+- If a human takeover is needed, the agent input grant is revoked first. Concurrent agent and human input is not supported.
+- Lock workstation, the UAC secure desktop, Ctrl+Alt+Delete/SAS, and elevation prompts fail as `Unavailable`. There is no UAC-disable and no secure-desktop automation fallback.
+- UIA selectors take priority over pixel coordinates, but the selector and the active window are still re-resolved immediately before the action.
+- Fixed resolution and DPI are treated as a Security Epoch-compatible image contract, and existing frames are rejected once drift appears.
+- The guest RPC never exposes raw `cmd.exe`, PowerShell, arbitrary binary paths, or arbitrary `winapp` arguments.
 
-### Data와 credential
+### Data and credentials
 
-- Screenshot과 UI tree에는 password, token, personal data가 들어갈 수 있습니다. Raw frame은 짧은 TTL, encryption at rest, lease-scoped access, bounded audit metadata와 explicit retention policy가 필요합니다.
-- Agent Folder를 VM에 mount하지 않습니다. 향후 file transfer가 필요하면 ADR 0001의 Authorized Workspace View와 validated output delta를 별도 typed capability로 구현합니다.
-- 첫 PoC는 real account credential을 사용하지 않습니다.
-- 이후 model이 password를 보고 직접 type하는 방식은 Opaque Credential Use가 아닙니다. Raw Credential Disclosure로 분류하고 confirmation/audit를 적용하거나, approved Credential Consumer가 guest의 정확한 field에 credential을 주입하되 bytes를 model/plugin에 반환하지 않는 별도 protocol이 필요합니다.
-- Clipboard와 browser password manager는 default off입니다. 활성화하면 별도의 Credential Consumer와 destination allowlist가 필요합니다.
+- Screenshots and the UI tree can contain passwords, tokens, and personal data. Raw frames need a short TTL, encryption at rest, lease-scoped access, bounded audit metadata, and an explicit retention policy.
+- The Agent Folder is never mounted into the VM. If file transfer becomes necessary later, implement ADR 0001's Authorized Workspace View and validated output delta as a separate typed capability.
+- The first PoC uses no real account credentials.
+- Having the model read a password and type it itself is not Opaque Credential Use. It has to be classified as Raw Credential Disclosure with confirmation and audit applied, or else a separate protocol is needed in which an approved Credential Consumer injects the credential into the exact guest field without returning the bytes to the model or the plugin.
+- The clipboard and the browser password manager are off by default. Enabling them requires a separate Credential Consumer and a destination allowlist.
 
-### Supply chain, Windows licensing과 image state
+### Supply chain, Windows licensing, and image state
 
-- Platform Extension, Computer Agent, `winapp`, virtio image와 golden disk metadata를 version/digest-pin하고 Security Epoch에 포함합니다.
-- `winapp` development certificate나 Developer Mode를 production guest에 남기지 않습니다. Project-owned bridge는 production signing identity로 서명합니다.
-- Windows 11 virtual desktop 권리는 edition, user/device와 access model에 따라 달라지므로 Microsoft licensing guidance를 deployment gate로 검토해야 합니다 ([Microsoft licensing guidance](https://www.microsoft.com/licensing/guidance/Windows-11-Licensing-for-Virtual-Desktops)). Evaluation media는 PoC 범위에서만 Microsoft의 terms에 맞게 사용합니다 ([Windows 11 Enterprise evaluation](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise)). 이 문서는 법률 자문이나 redistribution 권한을 제공하지 않습니다.
-- Windows 11 installer는 TPM device를 요구할 수 있지만 persistent vTPM은 필수가 아닙니다. KubeVirt의 persistent TPM/EFI backend-state snapshot은 같은 VM restore만 지원하며 다른 VM clone은 지원하지 않습니다 ([persistent state](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/compute/persistent_tpm_and_uefi_state.md#L1-L33), [TPM notes](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/compute/persistent_tpm_and_uefi_state.md#L35-L76)). Cloneable golden baseline에서는 persistent backend state를 피하고, BitLocker나 persistent Secure Boot state가 필요하면 per-VM provisioning을 별도 검증합니다.
+- Version- and digest-pin the Platform Extension, the Computer Agent, `winapp`, the virtio image, and the golden disk metadata, and include them in the Security Epoch.
+- No `winapp` development certificate and no Developer Mode is left in a production guest. The project-owned bridge is signed with the production signing identity.
+- Windows 11 virtual desktop rights vary with edition, user/device, and access model, so Microsoft's licensing guidance has to be reviewed as a deployment gate ([Microsoft licensing guidance](https://www.microsoft.com/licensing/guidance/Windows-11-Licensing-for-Virtual-Desktops)). Evaluation media is used only within the PoC scope and in line with Microsoft's terms ([Windows 11 Enterprise evaluation](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise)). This document provides neither legal advice nor redistribution rights.
+- The Windows 11 installer may require a TPM device, but a persistent vTPM is not mandatory. KubeVirt's persistent TPM/EFI backend-state snapshot supports restoring the same VM only, not cloning into another VM ([persistent state](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/compute/persistent_tpm_and_uefi_state.md#L1-L33), [TPM notes](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/compute/persistent_tpm_and_uefi_state.md#L35-L76)). Avoid persistent backend state in a cloneable golden baseline, and verify per-VM provisioning separately if BitLocker or persistent Secure Boot state is required.
 
-## 현재 repository와의 gap
+## Gap against the current repository
 
-**Observed fact.** 2026-08-30 repository scan에서 API kind는 `TypeClawInstance`, `CredentialRequest`, `CredentialApproval`뿐입니다. Main instance reconciler는 StatefulSet, Service와 relay RBAC를 만들고 ([controller](../../internal/controller/typeclawinstance_controller.go#L43-L138)), 별도 controller가 NetworkPolicy를 관리합니다 ([network controller](../../internal/controller/networkpolicy_controller.go#L34-L100)). KubeVirt, CDI, Windows, VNC, RDP dependency나 resource controller는 없습니다.
+**Observed fact.** In the 2026-08-30 repository scan the only API kinds are `TypeClawInstance`, `CredentialRequest`, and `CredentialApproval`. The main instance reconciler creates the StatefulSet, the Service, and the relay RBAC ([controller](../../internal/controller/typeclawinstance_controller.go#L43-L138)), and a separate controller manages the NetworkPolicy ([network controller](../../internal/controller/networkpolicy_controller.go#L34-L100)). There is no KubeVirt, CDI, Windows, VNC, or RDP dependency and no resource controller for them.
 
-따라서 production implementation에는 최소한 다음 work package가 새로 필요합니다.
+A production implementation therefore needs at least the following new work packages.
 
-- Generic Sandbox Lease API와 durable per-invocation outcome model.
-- Credentialless Sandbox Broker API/Deployment와 TypeClaw Platform Extension.
-- KubeVirt Windows Sandbox Reconciler, dedicated RBAC와 provider status.
-- DataVolume clone, VM, Service, NetworkPolicy, bootstrap Secret, PVC cleanup/finalizer lifecycle.
-- Windows golden-image pipeline와 signed Computer Agent artifact.
+- A generic Sandbox Lease API and a durable per-invocation outcome model.
+- A credentialless Sandbox Broker API/Deployment and the TypeClaw Platform Extension.
+- A KubeVirt Windows Sandbox Reconciler, dedicated RBAC, and provider status.
+- The DataVolume clone, VM, Service, NetworkPolicy, bootstrap Secret, and PVC cleanup/finalizer lifecycle.
+- A Windows golden-image pipeline and a signed Computer Agent artifact.
 - SPIFFE Windows guest identity and registration lifecycle.
-- Network Authority에 exact Broker/guest capability path.
-- Image/result bounds, unknown-outcome, cancellation, no-replay와 cleanup failure injection tests.
-- KubeVirt/CDI/storage/CNI/Talos canary와 provider certification suite.
+- An exact Broker/guest capability path in the Network Authority.
+- Image/result bounds, unknown-outcome, cancellation, no-replay, and cleanup failure-injection tests.
+- A KubeVirt/CDI/storage/CNI/Talos canary and a provider certification suite.
 
-이 scope를 기존 `TypeClawInstanceReconciler`에 직접 끼워 넣기 전에 ADR과 API ownership을 결정해야 합니다. 특히 generic `RemoteSandbox` contract를 generalize할지 Windows-specific Tool Execution Environment를 만들지, `SandboxLease`를 CRD로 expose할지 internal reconciler record로 둘지는 사람의 결정입니다.
+Before wedging this scope directly into the existing `TypeClawInstanceReconciler`, the ADR and the API ownership have to be decided. In particular, whether to generalize the generic `RemoteSandbox` contract or to build a Windows-specific Tool Execution Environment, and whether to expose `SandboxLease` as a CRD or keep it an internal reconciler record, are human decisions.
 
-## Failure modes와 fail-closed behavior
+## Failure modes and fail-closed behavior
 
 | Failure | Detection | Required behavior |
 |---|---|---|
-| `/dev/kvm`, CDI scratch, clone/snapshot 또는 NetworkPolicy 지원이 없음 | Provider canary와 StorageClass/CNI probe | Provider `Unavailable`; 다른 isolation으로 silent fallback 금지 |
-| ISO import/DataVolume clone이 지연·실패 | CDI/DataVolume condition과 deadline | Lease `ProvisioningFailed`; VM start 금지; partial PVC cleanup |
-| VMI는 Running이지만 Windows OOBE/session이 준비되지 않음 | QEMU agent + Computer Agent + observe readiness | Lease를 Active로 만들지 않음; bounded timeout 후 failure |
-| QEMU Guest Agent만 연결됨 | Computer Agent mTLS health 불일치 | Lifecycle metadata만 ready로 보고 tool은 unavailable |
-| Computer Agent만 연결되고 expected image/protocol이 아님 | SVID, Security Epoch, capability digest mismatch | Connection reject, VM quarantine/cleanup |
-| Desktop lock, LogonUI, UAC secure desktop | Agent session-state와 `no_interactive_desktop` | Action fail closed; UAC disable이나 VNC fallback 금지 |
-| Window animation, DPI/resolution 변화, stale screenshot | `frameId`, display revision, target re-resolution | `StaleFrame`/`target_moved`; re-observe 요청 |
-| Click/type dispatch 후 response loss | Invocation journal은 dispatch를 기록했지만 completion 없음 | `UnknownOutcome`; same action automatic retry 금지 |
-| TypeClaw cancellation이 dispatch 뒤 도착 | Guest cancellation acknowledgement 없음 | Remaining action revoke; current action은 `UnknownOutcome` 가능 |
-| Windows update/reboot와 liveness restart loop | maintenance state, probe/status transition | Lease drain; probe pause/bounded maintenance; image rebuild 정책 |
-| Human VNC/RDP와 agent가 같은 desktop을 조작 | input-owner lease와 session event | Agent grant revoke 또는 viewer-only; concurrent input 금지 |
-| Screenshot이 TypeClaw cap을 초과 | `tool-result-cap` marker와 byte metric | bounded re-encode/region retry; blank success로 취급 금지 |
-| `winapp` release behavior drift | Golden-image conformance suite | Image promotion block; arbitrary latest install 금지 |
-| Snapshot이 crash-consistent이거나 backend TPM/EFI state를 포함 | Snapshot indication과 volume inventory | Golden promotion/clone block; offline/quiesced rebuild |
-| Release 후 VM/PVC/Secret/Service가 남음 | Finalizer/GC audit와 TTL sweeper | Authority는 이미 revoke한 채 cleanup 독립 재시도; durable leak status |
-| Disposable disk가 재사용되어 cross-lease data가 남음 | owner/lease UID and storage provenance check | Attach reject, sanitize가 아니라 delete-by-default |
-| License/activation 조건 불명확 | Image provenance/licensing review | Image publish와 production lease block |
+| No `/dev/kvm`, CDI scratch, clone/snapshot, or NetworkPolicy support | Provider canary and StorageClass/CNI probe | Provider `Unavailable`; no silent fallback to another isolation |
+| ISO import or DataVolume clone is delayed or fails | CDI/DataVolume conditions and deadline | Lease `ProvisioningFailed`; no VM start; partial PVC cleanup |
+| The VMI is Running but Windows OOBE/session is not ready | QEMU agent + Computer Agent + observe readiness | Do not move the lease to Active; fail after a bounded timeout |
+| Only the QEMU Guest Agent is connected | Computer Agent mTLS health mismatch | Report only lifecycle metadata as ready and leave the tools unavailable |
+| The Computer Agent connects but is not the expected image or protocol | SVID, Security Epoch, capability digest mismatch | Reject the connection, quarantine or clean up the VM |
+| Desktop lock, LogonUI, UAC secure desktop | Agent session state and `no_interactive_desktop` | Fail the action closed; no UAC disable and no VNC fallback |
+| Window animation, DPI/resolution change, stale screenshot | `frameId`, display revision, target re-resolution | `StaleFrame`/`target_moved`; require a re-observe |
+| Response lost after a click/type dispatch | The invocation journal recorded the dispatch but no completion | `UnknownOutcome`; no automatic retry of the same action |
+| A TypeClaw cancellation arrives after dispatch | No guest cancellation acknowledgement | Revoke the remaining actions; the current action may be `UnknownOutcome` |
+| Windows update/reboot and a liveness restart loop | Maintenance state, probe/status transitions | Drain the lease; probe pause or bounded maintenance; image rebuild policy |
+| A human VNC/RDP session and the agent drive the same desktop | Input-owner lease and session events | Revoke the agent grant or make it viewer-only; no concurrent input |
+| A screenshot exceeds the TypeClaw cap | `tool-result-cap` marker and byte metrics | Bounded re-encode or region retry; never treat it as a blank success |
+| `winapp` release behavior drift | Golden-image conformance suite | Block image promotion; no installing an arbitrary latest version |
+| The snapshot is crash-consistent or includes backend TPM/EFI state | Snapshot indications and volume inventory | Block golden promotion and cloning; rebuild offline or quiesced |
+| VM/PVC/Secret/Service remain after release | Finalizer/GC audit and TTL sweeper | Retry cleanup independently with authority already revoked; durable leak status |
+| A disposable disk is reused and cross-lease data remains | Owner/lease UID and storage provenance check | Reject the attach; delete by default rather than sanitize |
+| License or activation conditions are unclear | Image provenance and licensing review | Block image publication and the production lease |
 
-Online VM snapshot은 QEMU Guest Agent가 있으면 filesystem freeze를 시도하지만, 없거나 실패하면 crash-consistent일 수 있습니다. Snapshot status는 이를 indication으로 표시하며 restore target은 stopped 상태여야 합니다 ([snapshot consistency](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/storage/snapshot_restore_api.md#L30-L38), [indications](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/storage/snapshot_restore_api.md#L86-L99)). Golden image publication은 offline clean shutdown을 기본으로 해야 합니다.
+An online VM snapshot attempts a filesystem freeze when the QEMU Guest Agent is present, but it can be crash-consistent when the agent is missing or the freeze fails. The snapshot status marks this as an indication, and the restore target has to be stopped ([snapshot consistency](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/storage/snapshot_restore_api.md#L30-L38), [indications](https://github.com/kubevirt/user-guide/blob/bf1f3564e2a41eb059df5ab126724bb78cf15200/docs/storage/snapshot_restore_api.md#L86-L99)). Golden image publication has to default to an offline clean shutdown.
 
 ## Phased PoC
 
-### Phase 0 — architecture와 environment gate
+### Phase 0 — architecture and environment gate
 
-- New ADR에서 KubeVirt provider와 ADR 0001의 관계, Sandbox Lease ownership, production certification criteria를 결정합니다.
-- Windows licensing과 ISO provenance를 승인합니다.
-- Talos node의 virtualization, KubeVirt/CDI version, scratch/clone storage, CNI NetworkPolicy를 canary로 검증합니다.
-- 첫 target은 `amd64`, single display, disposable disk, **plugin/guest의 Kubernetes credential 없음**, **real external account credential 없음**, no public viewer로 고정합니다.
+- Decide, in a new ADR, the relationship between the KubeVirt provider and ADR 0001, the Sandbox Lease ownership, and the production certification criteria.
+- Approve the Windows licensing and the ISO provenance.
+- Verify the Talos nodes' virtualization, the KubeVirt/CDI versions, scratch/clone storage, and the CNI NetworkPolicy with a canary.
+- Fix the first target at `amd64`, a single display, a disposable disk, **no Kubernetes credential in the plugin or the guest**, **no real external account credential**, and no public viewer.
 
-Exit criterion: cluster-admin prerequisites와 security exceptions가 명시되고 silent fallback이 없습니다.
+Exit criterion: the cluster-admin prerequisites and the security exceptions are stated explicitly and there is no silent fallback.
 
 ### Phase 1 — manually managed Windows VM
 
-- CDI + Sysprep + virtio/QEMU Guest Agent로 한 개의 Windows golden VM을 만듭니다.
-- Fixed `1024x768` 또는 선택한 해상도와 DPI를 설정합니다.
-- Administrator가 `virtctl vnc`와 KubeVirt screenshot으로 bootstrap을 확인합니다.
-- Notepad, Calculator, browser 같은 deterministic test application을 설치합니다.
+- Build one Windows golden VM with CDI + Sysprep + virtio/QEMU Guest Agent.
+- Set a fixed `1024x768`, or the chosen resolution, and the DPI.
+- An administrator confirms the bootstrap with `virtctl vnc` and the KubeVirt screenshot.
+- Install deterministic test applications such as Notepad, Calculator, and a browser.
 
-Exit criterion: 10회 clean clone/boot에서 동일한 display/session readiness와 no shared machine credential을 확인합니다.
+Exit criterion: ten clean clone/boot runs show identical display and session readiness and no shared machine credential.
 
-### Phase 2 — Computer Agent와 development plugin
+### Phase 2 — Computer Agent and development plugin
 
-- Static VM에 private test certificate를 넣고, Computer Agent가 pinned `winapp ui` allowlist만 실행하게 합니다.
-- Development-only TypeClaw plugin으로 `observe`, `act`를 노출합니다. KubeVirt lifecycle은 아직 수동이며 plugin에는 kubeconfig가 없습니다.
-- UIA-first와 pixel fallback task를 각각 수행합니다.
-- Screenshot compression/cap behavior를 측정하고 model이 실제 frame을 받는지 검증합니다.
+- Put a private test certificate on the static VM and let the Computer Agent run only the pinned `winapp ui` allowlist.
+- Expose `observe` and `act` through a development-only TypeClaw plugin. The KubeVirt lifecycle is still manual and the plugin holds no kubeconfig.
+- Run UIA-first and pixel-fallback tasks separately.
+- Measure screenshot compression and cap behavior, and verify that the model actually receives the frame.
 
 Example tasks:
 
-1. Notepad에 지정 text를 입력하고 Save dialog를 열되 실제 file write 직전에 멈춥니다.
-2. Calculator에서 UIA와 pixel path로 같은 계산을 수행하고 결과를 inspect합니다.
-3. Browser의 local test page에서 checkbox/form/navigation을 수행합니다.
-4. Lock screen과 UAC prompt에서 action이 실패하는지 확인합니다.
+1. Type given text into Notepad and open the Save dialog, stopping just before the actual file write.
+2. Perform the same calculation in Calculator through the UIA path and the pixel path, and inspect the result.
+3. Work through checkboxes, a form, and navigation on a local test page in the browser.
+4. Confirm that actions fail on the lock screen and at a UAC prompt.
 
-Exit criterion: 100 consecutive observe/action/observe loops, stale-frame rejection, bounded output, cancellation과 post-dispatch connection-loss `UnknownOutcome` test가 통과합니다.
+Exit criterion: 100 consecutive observe/action/observe loops, stale-frame rejection, bounded output, cancellation, and the post-dispatch connection-loss `UnknownOutcome` test all pass.
 
-### Phase 3 — Broker, Reconciler와 Sandbox Lease
+### Phase 3 — Broker, Reconciler, and Sandbox Lease
 
-- TypeClaw Platform Extension → credentialless Broker → separate Sandbox Reconciler path를 구현합니다.
-- Lease마다 DataVolume clone, VM, ClusterIP Service, NetworkPolicy, Secret, TTL, release cleanup을 자동화합니다.
-- Runtime NetworkPolicy에 exact Broker capability route만 추가합니다.
-- No ServiceAccount token in runtime, Broker, guest를 admission/E2E에서 검사합니다.
+- Implement the TypeClaw Platform Extension → credentialless Broker → separate Sandbox Reconciler path.
+- Automate the DataVolume clone, VM, ClusterIP Service, NetworkPolicy, Secret, TTL, and release cleanup per lease.
+- Add only the exact Broker capability route to the runtime NetworkPolicy.
+- Check in admission and E2E that there is no ServiceAccount token in the runtime, the Broker, or the guest.
 
-Exit criterion: 50 concurrent/sequential disposable leases에서 cross-lease network/data access가 없고, crash 뒤 zombie resource가 TTL 내 cleanup됩니다.
+Exit criterion: across 50 concurrent and sequential disposable leases there is no cross-lease network or data access, and zombie resources after a crash are cleaned up within the TTL.
 
-### Phase 4 — SPIFFE와 hardening
+### Phase 4 — SPIFFE and hardening
 
-- SPIRE Windows service, Windows workload attestor, one-shot bootstrap, per-lease registration과 X.509-SVID rotation을 검증합니다.
-- Platform Extension과 guest artifacts를 signed/digest-pinned Platform Bundle/golden image로 release합니다.
-- Network Authority, resource quotas, screenshot retention/redaction, security audit와 failure injection을 추가합니다.
-- KubeVirt provider canary와 Security Epoch invalidation을 구현합니다.
+- Verify the SPIRE Windows service, the Windows workload attestor, the one-shot bootstrap, per-lease registration, and X.509-SVID rotation.
+- Release the Platform Extension and the guest artifacts as a signed, digest-pinned Platform Bundle and golden image.
+- Add Network Authority, resource quotas, screenshot retention and redaction, security audit, and failure injection.
+- Implement the KubeVirt provider canary and Security Epoch invalidation.
 
-Exit criterion: identity replay, stolen clone, stale Security Epoch, CNI failure, SPIRE outage와 cleanup failure가 모두 fail closed이며 new ADR의 certification suite가 통과합니다.
+Exit criterion: identity replay, a stolen clone, a stale Security Epoch, CNI failure, a SPIRE outage, and cleanup failure all fail closed, and the new ADR's certification suite passes.
 
 ### Phase 5 — optional product capabilities
 
-- Human viewer gateway, server-enforced view-only와 agent takeover handoff.
-- Authorized Workspace View 기반 file transfer.
+- Human viewer gateway, server-enforced view-only, and agent takeover handoff.
+- File transfer based on the Authorized Workspace View.
 - Approved credential-field injection.
-- Retained desktop, backup/restore와 measured restart SLO.
+- Retained desktop, backup/restore, and a measured restart SLO.
 
-이 기능들은 core computer-use success와 security boundary가 증명되기 전에는 PoC scope에 넣지 않습니다.
+None of these enter the PoC scope before core computer-use success and the security boundary are proven.
 
 ## Production acceptance checklist
 
-- [ ] Provider-specific ADR와 threat model이 accepted 상태입니다.
-- [ ] KubeVirt/CDI/CNI/storage/Windows/virtio/Computer Agent version matrix가 pinned되어 있습니다.
-- [ ] TypeClaw Runtime, Platform Extension, Broker와 guest에 Kubernetes credential이 없습니다.
-- [ ] Plugin은 signed Platform Bundle이며 mutable Agent Folder에서 load되지 않습니다.
-- [ ] Exact Broker route 외 cluster/private egress가 차단됩니다.
-- [ ] One lease가 one desktop input authority와 one disk owner에 bind됩니다.
-- [ ] VMI Running, QEMU AgentConnected, interactive desktop, Computer Agent mTLS를 모두 readiness에 사용합니다.
-- [ ] `UnknownOutcome` 뒤 click/type이 replay되지 않습니다.
-- [ ] Lock/UAC/secure desktop에서 fail closed하고 UAC를 끄지 않습니다.
-- [ ] Screenshot이 실제 model input에 들어가며 byte/context/retention bound를 지킵니다.
-- [ ] Golden image에 reusable password, join token, private key, kubeconfig가 없습니다.
-- [ ] Disposable release 뒤 VM/PVC/Service/Secret와 guest identity가 제거됩니다.
-- [ ] Windows licensing, activation, update와 redistribution policy가 승인됐습니다.
-- [ ] Startup time, action latency와 screenshot quality SLO는 E2B 수치를 가정하지 않고 실제 cluster에서 측정됐습니다.
+- [ ] The provider-specific ADR and threat model are accepted.
+- [ ] The KubeVirt/CDI/CNI/storage/Windows/virtio/Computer Agent version matrix is pinned.
+- [ ] The TypeClaw Runtime, Platform Extension, Broker, and guest hold no Kubernetes credential.
+- [ ] The plugin is a signed Platform Bundle and is not loaded from a mutable Agent Folder.
+- [ ] Cluster and private egress other than the exact Broker route is blocked.
+- [ ] One lease binds to one desktop input authority and one disk owner.
+- [ ] VMI Running, QEMU AgentConnected, the interactive desktop, and Computer Agent mTLS are all used for readiness.
+- [ ] No click or type is replayed after an `UnknownOutcome`.
+- [ ] Lock, UAC, and secure desktop fail closed, and UAC is never turned off.
+- [ ] Screenshots really enter the model input and respect the byte, context, and retention bounds.
+- [ ] The golden image holds no reusable password, join token, private key, or kubeconfig.
+- [ ] After a disposable release the VM, PVC, Service, Secret, and guest identity are removed.
+- [ ] The Windows licensing, activation, update, and redistribution policy is approved.
+- [ ] Startup time, action latency, and screenshot quality SLOs were measured on a real cluster rather than assumed from E2B's numbers.
 
-## 남은 결정
+## Remaining decisions
 
-1. KubeVirt를 generic RemoteSandbox provider로 generalize할지, 별도 Tool Execution Environment로 모델링할지 결정해야 합니다.
-2. Sandbox Lease를 public namespaced CRD로 만들지, Broker/Reconciler 전용 API record로 둘지 결정해야 합니다.
-3. Disposable desktop만 먼저 제공할지, TypeClaw Instance에 귀속된 retained desktop도 v1에 넣을지 결정해야 합니다.
-4. Interactive Windows session을 production에서 어떻게 만들고 unlock 상태를 유지할지 결정해야 합니다.
-5. Model-facing screenshot의 해상도, encoding, cap exemption과 retention을 결정해야 합니다.
-6. `winapp`을 certification된 implementation으로 유지할지, native Windows Computer Agent로 교체할지 결정해야 합니다.
-7. Human viewer와 agent takeover를 core scope와 분리할지 결정해야 합니다.
-8. Credential-bearing UI automation을 Raw Credential Disclosure로만 제공할지, field-specific Opaque Credential Use protocol을 만들지 결정해야 합니다.
+1. Decide whether to generalize KubeVirt into a generic RemoteSandbox provider or to model it as a separate Tool Execution Environment.
+2. Decide whether to make the Sandbox Lease a public namespaced CRD or to keep it an API record private to the Broker and Reconciler.
+3. Decide whether to ship only the disposable desktop first, or to include a retained desktop bound to a TypeClaw Instance in v1.
+4. Decide how a production interactive Windows session is created and kept unlocked.
+5. Decide the resolution, encoding, cap exemption, and retention of the model-facing screenshot.
+6. Decide whether to keep `winapp` as the certified implementation or to replace it with a native Windows Computer Agent.
+7. Decide whether to separate the human viewer and agent takeover from the core scope.
+8. Decide whether to offer credential-bearing UI automation only as Raw Credential Disclosure, or to build a field-specific Opaque Credential Use protocol.
 
 ## Primary source index
 

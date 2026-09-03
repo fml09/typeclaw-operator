@@ -49,6 +49,10 @@ spec:
           args:
             - --metrics-bind-address={{ .Values.metricsBindAddress }}
             - --health-probe-bind-address={{ .Values.healthProbeBindAddress }}
+            # The Desktop Gateway binary ships in this image, so it is pinned
+            # to the same reference the manager runs: a gateway on a different
+            # release would speak a different guest and plugin contract.
+            - --desktop-gateway-image={{ .Values.image.repository }}:{{ .Values.image.tag | default (printf "v%s" .Chart.AppVersion) }}
             {{- if .Values.credentialBroker.enabled }}
             - --credential-broker-bind-address={{ .Values.credentialBroker.bindAddress }}
             - --credential-broker-certificate=/var/run/typeclaw/credential-broker/tls.crt

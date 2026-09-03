@@ -41,7 +41,7 @@ func TestNetworkPolicyDefaultsToPublicWeb(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			policy := NetworkPolicy(netInstance(func(in *typeclawv1alpha1.TypeClawInstance) {
 				in.Spec.Network.Egress = egress
-			}))
+			}), nil, "")
 
 			if policy.Name != "kakao-agent" || policy.Namespace != "agents" {
 				t.Fatalf("unexpected object ref %s/%s", policy.Namespace, policy.Name)
@@ -109,7 +109,7 @@ func TestNetworkPolicyDefaultsToPublicWeb(t *testing.T) {
 func TestNetworkPolicyIngressCIDRsInjectOneRuleEach(t *testing.T) {
 	policy := NetworkPolicy(netInstance(func(in *typeclawv1alpha1.TypeClawInstance) {
 		in.Spec.Network.IngressCIDRs = []string{"203.0.113.7/32", "198.51.100.0/24"}
-	}))
+	}), nil, "")
 	rules := policy.Spec.Ingress
 	if len(rules) != 3 {
 		t.Fatalf("ingress rules = %d, want same-namespace + 2 CIDRs", len(rules))
@@ -128,7 +128,7 @@ func TestNetworkPolicyIngressCIDRsInjectOneRuleEach(t *testing.T) {
 func TestNetworkPolicyUnrestrictedShape(t *testing.T) {
 	policy := NetworkPolicy(netInstance(func(in *typeclawv1alpha1.TypeClawInstance) {
 		in.Spec.Network.Egress = EgressUnrestricted
-	}))
+	}), nil, "")
 	if len(policy.Spec.Egress) != 1 {
 		t.Fatalf("egress rules = %d, want single allow-all rule", len(policy.Spec.Egress))
 	}
@@ -146,5 +146,50 @@ func TestNetworkPolicyUnrestrictedShape(t *testing.T) {
 	}
 	if len(policy.Spec.Ingress) != 1 {
 		t.Fatalf("unrestricted must not change ingress, got %d rules", len(policy.Spec.Ingress))
+	}
+}
+
+func TestNetworkPolicyAdmitsTheDesktopGateway(t *testing.T) {
+	in := netInstance(func(in *typeclawv1alpha1.TypeClawInstance) {
+		in.Spec.Runtime.Version = typeclawv1alpha1.PersonalDesktopMinimumRuntimeVersion
+		in.Spec.PersonalDesktop = &typeclawv1alpha1.PersonalDesktopSpec{
+			Enabled:   true,
+			Namespace: "typeclaw-desktops",
+			Owner:     typeclawv1alpha1.PersonalDesktopOwnerSpec{Subject: "alice@example.com"},
+			Image:     typeclawv1alpha1.PersonalDesktopImageSpec{GoldenDataVolume: "ubuntu-golden"},
+		}
+	})
+	policy := NetworkPolicy(in, nil, "10.96.0.7")
+
+	// PublicWeb excludes cluster-internal destinations, so without a rule of
+	// its own every typed action would be dropped by the runtime's own
+	// boundary.
+	rule := policy.Spec.Egress[len(policy.Spec.Egress)-1]
+	peer := rule.To[0]
+	if peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "typeclaw-desktops" {
+		t.Fatalf("gateway namespace peer = %+v", peer.NamespaceSelector)
+	}
+	if peer.PodSelector.MatchLabels["app.kubernetes.io/name"] != "typeclaw-desktop-gateway" {
+		t.Fatalf("gateway pod peer = %+v", peer.PodSelector)
+	}
+	// Egress matches pre-DNAT destinations, so the cluster IP the runtime
+	// actually dials needs its own block.
+	if rule.To[1].IPBlock == nil || rule.To[1].IPBlock.CIDR != "10.96.0.7/32" {
+		t.Fatalf("gateway Service peer = %+v", rule.To[1])
+	}
+	if len(rule.Ports) != 1 || rule.Ports[0].Port.IntValue() != 8080 {
+		t.Fatalf("gateway rule ports = %+v", rule.Ports)
+	}
+}
+
+func TestNetworkPolicyWithoutADesktopHasNoGatewayRule(t *testing.T) {
+	policy := NetworkPolicy(netInstance(nil), nil, "10.96.0.7")
+	for _, rule := range policy.Spec.Egress {
+		for _, peer := range rule.To {
+			if peer.PodSelector != nil &&
+				peer.PodSelector.MatchLabels["app.kubernetes.io/name"] == "typeclaw-desktop-gateway" {
+				t.Fatalf("an Instance with no desktop must not admit a gateway")
+			}
+		}
 	}
 }

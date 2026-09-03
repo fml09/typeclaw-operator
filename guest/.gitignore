@@ -1,0 +1,6 @@
+# `python3 -m unittest discover` byte-compiles the agent next to its source.
+# CPython bytecode goes stale on the next edit and conflicts on every branch
+# that touches the agent, so it never belongs in a commit. The repository root
+# ignores `guest/**/__pycache__/` as well; this file makes the artifacts
+# unstageable no matter which lane lands first.
+__pycache__/

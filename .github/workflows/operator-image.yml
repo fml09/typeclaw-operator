@@ -31,19 +31,21 @@ jobs:
       - name: Build linux/${{ matrix.arch }} image
         run: docker build --platform linux/${{ matrix.arch }} -t typeclaw-operator:${{ matrix.arch }} .
 
-      - name: Smoke — manager, relay, credential-runner, nonroot user
+      - name: Smoke — manager, relay, credential-runner, desktop-gateway, noVNC, nonroot user
         run: |
           cid="$(docker create typeclaw-operator:${{ matrix.arch }})"
           trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
           entries="$(docker export "$cid" | tar -t)"
-          for bin in manager relay credential-runner; do
+          for bin in manager relay credential-runner desktop-gateway; do
             printf '%s\n' "$entries" | grep -qx -e "$bin" -e "./$bin" \
               || { echo "::error::/$bin missing from image"; exit 1; }
           done
+          printf '%s\n' "$entries" | grep -qx -e "opt/novnc/core/rfb.js" -e "./opt/novnc/core/rfb.js" \
+            || { echo "::error::noVNC client missing from image"; exit 1; }
           user="$(docker inspect --format '{{.Config.User}}' "$cid")"
           [ "$user" = "65532:65532" ] \
             || { echo "::error::unexpected Config.User '$user'"; exit 1; }
-          echo "smoke ok: /manager + /relay + /credential-runner, Config.User=$user"
+          echo "smoke ok: /manager + /relay + /credential-runner + /desktop-gateway + noVNC, Config.User=$user"
 
       - name: Export image tarball
         run: docker save typeclaw-operator:${{ matrix.arch }} -o "/tmp/image-${{ matrix.arch }}.tar"
