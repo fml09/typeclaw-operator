@@ -7,8 +7,9 @@ status: accepted
 The approved Wayfinding Map scoped its destination at a decision-ready handoff
 and listed implementation as out of scope until every open ticket resolved. On
 2026-08-25 the product owner directed full implementation of the
-Hermes-equivalent capability set now ("hermes operator처럼 기능들을 모두
-구현"). This ADR records that pivot and the conservative defaults taken for
+Hermes-equivalent capability set now — in their words, translated from Korean:
+"implement all of the features, like the hermes operator". This ADR records
+that pivot and the conservative defaults taken for
 tickets that remain open, so code does not silently override the tracker.
 
 Scope follows the Capability Parity rule in CONTEXT.md: the same operational

@@ -26,6 +26,17 @@ Deploy a sample TypeClaw Instance:
 kubectl apply -f config/samples/typeclaw_v1alpha1_typeclawinstance.yaml
 ```
 
+## Personal Desktop
+
+A TypeClaw Instance can own a **Personal Desktop**: a persistent KubeVirt
+virtual machine that its single human owner opens in a browser over Tailscale
+and that the agent drives through typed actions on the same screen. The root
+disk is retained across sessions and power cycles, Linux and Windows guests are
+both supported, and only one party — the human or the agent — holds input at a
+time. KubeVirt, CDI, and the Tailscale Kubernetes operator are administrator-owned
+prerequisites that this operator uses but never installs. See the
+[Personal Desktop guide](docs/personal-desktop.md).
+
 ## Design decisions
 
 Architecture and security boundaries are recorded as ADRs:
@@ -34,6 +45,9 @@ Architecture and security boundaries are recorded as ADRs:
 - [ADR-0002: SPIFFE workload identity and credential execution](docs/adr/0002-spiffe-workload-identity-and-credential-execution.md)
 - [ADR-0003: Consume forked Managed Runtime images](docs/adr/0003-consume-fork-managed-runtime-images.md)
 - [ADR-0004: Implement parity capabilities](docs/adr/0004-implement-parity-capabilities.md)
+- [ADR-0005: SelfConfig as observed declarations](docs/adr/0005-selfconfig-observed-declarations.md)
+- [ADR-0006: Per-environment seccomp deviation](docs/adr/0006-per-environment-seccomp-deviation.md)
+- [ADR-0007: Personal Desktop as a first-class capability](docs/adr/0007-personal-desktop.md)
 
 ## License
 
