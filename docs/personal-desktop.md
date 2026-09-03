@@ -303,18 +303,33 @@ and cannot open is worse than an error, which is why the operator refuses to
 render a Sidecar console without it.
 
 It also needs one tailnet credential, named by `access.tailscale.authSecret` — a
-Secret in the desktop namespace holding either `TS_AUTHKEY` (a reusable,
-pre-authorized, **ephemeral** key) or `TS_CLIENT_ID` and `TS_CLIENT_SECRET`. The
-key must be ephemeral: the sidecar keeps its node state on an `emptyDir` rather
-than in a Secret, deliberately, so that publishing a console does not widen the
-Gateway's Kubernetes credential. An ephemeral device is removed from the tailnet
-shortly after the Pod goes away and gives its MagicDNS name back; a
-non-ephemeral one lingers and the next Pod gets `<hostname>-1`.
+Secret in the desktop namespace holding either `TS_CLIENT_ID` and
+`TS_CLIENT_SECRET` (an OAuth client scoped to the tags in
+`access.tailscale.tags`) or a reusable `TS_AUTHKEY`.
+
+**The device must not be ephemeral.** OAuth client secrets register ephemeral
+nodes by default, and an ephemeral node is reaped when its Pod goes away — so
+the next Pod re-registers, and if the old device has not been reaped yet the
+control plane hands out `<hostname>-1`. The console then answers on a name the
+operator never reported. Append the parameters that turn it off:
 
 ```sh
 kubectl -n <ns> create secret generic tailscale-console \
-  --from-literal=TS_AUTHKEY='tskey-auth-...'
+  --from-literal=TS_CLIENT_ID='<client id>' \
+  --from-literal=TS_CLIENT_SECRET='tskey-client-...?ephemeral=false&preauthorized=true'
 ```
+
+The operator backs the sidecar's state directory with a small
+PersistentVolumeClaim (`<instance>-desktop-gateway-state`) for the same reason:
+tailscaled's node identity lives there, and losing it on restart re-registers
+the device. Between the two, the console keeps one identity and one name for the
+life of the desktop.
+
+State deliberately does not live in a Kubernetes Secret, which is the usual
+pattern for this container. Keeping it out of the API server is what lets the
+console sidecar exist without widening the Gateway's Kubernetes credential — see
+[ADR 0007](adr/0007-personal-desktop.md) decision 3. The cost is that deleting a
+desktop leaves an offline device on the tailnet for an administrator to remove.
 
 **`Ingress` — only where the CNI enforces NetworkPolicy.** The operator creates
 an Ingress with `ingressClassName: tailscale` pointing at the Gateway's console

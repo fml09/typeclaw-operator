@@ -16,6 +16,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -321,12 +322,16 @@ func gatewayContainerPorts(instance *typeclawv1alpha1.TypeClawInstance) []corev1
 }
 
 // gatewayVolumes renders the volumes the tailscaled sidecar needs, and nothing
-// at all in Ingress mode. The state directory is an emptyDir rather than a
-// Kubernetes Secret on purpose: keeping tailscaled's state out of the API
-// server is what lets this sidecar exist without widening the Gateway's
-// Kubernetes credential, which ADR 0007 already records as contested. The cost
-// is that the tailnet device must be ephemeral, so it is cleaned up when the
-// Pod goes away instead of lingering and taking its MagicDNS name with it.
+// at all in Ingress mode.
+//
+// State lives on a PersistentVolumeClaim rather than in a Kubernetes Secret,
+// which is what lets this sidecar exist without widening the Gateway's
+// Kubernetes credential -- a credential ADR 0007 already records as contested.
+// It is not an emptyDir either: tailscaled's node identity lives here, and
+// losing it on every restart makes the node re-register and take a suffixed
+// MagicDNS name whenever the previous device has not been reaped yet. The
+// Deployment is single-replica with a Recreate strategy, so a ReadWriteOnce
+// claim never has two writers.
 func gatewayVolumes(instance *typeclawv1alpha1.TypeClawInstance) []corev1.Volume {
 	if !ConsoleSidecar(instance.Spec.PersonalDesktop) {
 		return nil
@@ -341,7 +346,14 @@ func gatewayVolumes(instance *typeclawv1alpha1.TypeClawInstance) []corev1.Volume
 				},
 			},
 		},
-		{Name: "tailscale-state", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{
+			Name: "tailscale-state",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: names.GatewayState,
+				},
+			},
+		},
 		{Name: "tailscale-tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
 }
@@ -440,6 +452,32 @@ func optionalTokenRef(secretName, key string) *corev1.EnvVarSource {
 			LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
 			Key:                  key,
 			Optional:             &optional,
+		},
+	}
+}
+
+// GatewayStateClaim renders the volume behind tailscaled's node identity, or
+// nil when no console sidecar runs. It is never resized or deleted while the
+// desktop exists: losing it means losing the device, and the desktop's console
+// address changes underneath its owner.
+func GatewayStateClaim(instance *typeclawv1alpha1.TypeClawInstance) *corev1.PersistentVolumeClaim {
+	if !ConsoleSidecar(instance.Spec.PersonalDesktop) {
+		return nil
+	}
+	names := Names(instance)
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      names.GatewayState,
+			Namespace: names.Namespace,
+			Labels:    Labels(instance),
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse(TailscaleStateSize),
+				},
+			},
 		},
 	}
 }
