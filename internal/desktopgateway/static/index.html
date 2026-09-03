@@ -30,7 +30,7 @@
       padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
     }
     .brand { display: flex; align-items: baseline; gap: 10px; margin-right: auto; min-width: 0; }
-    .brand h1 { margin: 0; font-size: 16px; letter-spacing: .2px; white-space: nowrap; }
+    .brand h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; }
     .brand .name { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
     .chip {
       display: inline-flex; align-items: center; gap: 6px;
@@ -47,7 +47,7 @@
       background: #40170f; color: var(--danger); border: 1px solid #6d2a1d;
     }
     .os { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
-    #identity { font-size: 12px; color: var(--muted); }
+    #identity { font-size: 12px; color: #7d8b97; padding-left: 4px; }
 
     .notice {
       margin: 12px 16px 0; padding: 10px 12px; border-radius: 8px;
@@ -57,7 +57,10 @@
     .layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 14px; padding: 14px 16px 16px; flex: 1; }
     .stage {
       position: relative; display: grid; place-items: center; min-height: 60vh; overflow: hidden;
-      background: #05070a; border: 1px solid var(--line); border-radius: 12px;
+      background:
+        radial-gradient(120% 90% at 50% 0%, #0d1218 0%, #05070a 62%),
+        #05070a;
+      border: 1px solid var(--line); border-radius: 12px;
     }
     .screen { display: grid; place-items: center; width: 100%; height: 100%; overflow: auto; }
     .screen[data-fit="false"] { place-items: start; }
@@ -71,29 +74,50 @@
       padding: 3px 9px; border-radius: 6px; font-size: 11px; letter-spacing: .1em;
       text-transform: uppercase; color: #b9c6d1; background: rgba(10, 14, 18, .62); border: 1px solid var(--line);
     }
-    .empty {
-      position: absolute; inset: 0; display: grid; place-content: center; gap: 10px;
-      justify-items: center; text-align: center; padding: 24px; cursor: pointer; color: var(--muted);
+    .empty { position: absolute; inset: 0; display: grid; place-content: center; padding: 24px; }
+    .empty-card {
+      display: grid; justify-items: center; gap: 12px; max-width: 34ch; text-align: center;
+      color: var(--muted); font-size: 13.5px; line-height: 1.6;
     }
-    .empty strong { color: var(--text); font-size: 17px; }
+    .empty-icon { width: 34px; height: 34px; color: #4a5762; }
+    .empty strong { color: var(--text); font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+    .empty-card button { margin-top: 4px; }
     .stage-tools { position: absolute; right: 10px; top: 10px; display: flex; gap: 6px; }
-    .stage-tools button { min-height: 32px; padding: 0 10px; font-size: 12px; }
+    .stage-tools button {
+      min-height: 30px; padding: 0 10px; font-size: 12px;
+      background: rgba(16, 21, 27, .82); backdrop-filter: blur(6px); border-color: #364049;
+    }
+    .stage-tools button:hover:not(:disabled) { background: rgba(30, 37, 45, .92); }
 
     aside {
-      display: flex; flex-direction: column; gap: 14px; padding: 14px;
+      display: flex; flex-direction: column; gap: 13px; padding: 15px;
       border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
       max-height: calc(100vh - 90px); overflow: auto;
     }
-    aside h2 { margin: 0 0 6px; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+    aside > section + section { border-top: 1px solid var(--line); padding-top: 13px; }
+    aside h2 {
+      margin: 0 0 8px; font-size: 11px; letter-spacing: .11em;
+      text-transform: uppercase; color: #7d8b97; font-weight: 600;
+    }
+    aside p { margin: 8px 0 0; }
     .group { display: flex; flex-wrap: wrap; gap: 6px; }
     button {
-      min-height: 38px; padding: 0 12px; border: 1px solid #3b454e; border-radius: 8px;
-      background: var(--panel-2); color: inherit; font: inherit; font-size: 14px; cursor: pointer;
+      min-height: 36px; padding: 0 13px; border: 1px solid #3b454e; border-radius: 8px;
+      background: var(--panel-2); color: inherit; font: inherit; font-size: 13.5px;
+      font-weight: 500; cursor: pointer;
+      transition: background-color .12s ease, border-color .12s ease;
     }
-    button:hover:not(:disabled) { border-color: #55636f; }
-    button.primary { background: var(--accent-dim); border-color: #2a7a5f; }
-    button.danger { color: var(--danger); }
-    button:disabled { opacity: .4; cursor: not-allowed; }
+    button:hover:not(:disabled) { background: #222932; border-color: #55636f; }
+    button:active:not(:disabled) { transform: translateY(.5px); }
+    button.primary { background: var(--accent-dim); border-color: #2a7a5f; color: #d6f5e8; }
+    button.primary:hover:not(:disabled) { background: #1d6650; border-color: #379372; }
+    button.danger { color: var(--danger); border-color: #5c2b23; }
+    button.danger:hover:not(:disabled) { background: #2a1310; border-color: #7d3527; }
+    button:disabled { opacity: .38; cursor: not-allowed; }
+    :is(button, textarea, summary):focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 2px;
+    }
+    @media (prefers-reduced-motion: reduce) { button { transition: none; } }
     textarea {
       width: 100%; min-height: 60px; padding: 8px; resize: vertical;
       border: 1px solid #3b454e; border-radius: 8px; background: #0b0e11; color: inherit; font: inherit;
@@ -146,11 +170,20 @@
 
     <main class="layout">
       <section class="stage" id="stage" data-controlling="false">
-        <div id="screen" class="screen" data-fit="true"><img id="fallback" alt="View-only screen of the Personal Desktop"></div>
+        <div id="screen" class="screen" data-fit="true"><img id="fallback" alt="Live view of the Personal Desktop" hidden></div>
         <div class="watermark" id="watermark" hidden>View only</div>
         <div class="empty" id="empty">
-          <strong>The screen is not being shown</strong>
-          <span>Start the live view to poll screenshots, or take control for an interactive session.</span>
+          <div class="empty-card">
+            <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2.6" y="4.2" width="18.8" height="12.6" rx="2.2"></rect>
+              <path d="M8.4 20.4h7.2M12 16.8v3.6"></path>
+            </svg>
+            <strong>The screen is not being shown</strong>
+            <span>Live view polls screenshots and sends no input. Taking control opens an
+              interactive session, and only one controller exists at a time.</span>
+            <button id="empty-action" class="primary">Start live view</button>
+          </div>
         </div>
         <div class="stage-tools">
           <button id="fit">Fit: on</button>
@@ -432,6 +465,12 @@
       snapshotController?.abort();
       snapshotController = undefined;
       if (image.src.startsWith('blob:')) URL.revokeObjectURL(image.src);
+      // Both halves matter. Revoking the blob without dropping the src leaves
+      // the element pointing at a dead URL, and an <img> that cannot load its
+      // source renders the browser's broken-image glyph and its alt text over
+      // the empty-state message.
+      image.removeAttribute('src');
+      image.hidden = true;
     }
 
     async function snapshot(epoch, signal) {
@@ -442,6 +481,7 @@
       const next = URL.createObjectURL(blob);
       const previous = image.src;
       image.src = next;
+      image.hidden = false;
       if (previous.startsWith('blob:')) URL.revokeObjectURL(previous);
     }
 
@@ -494,6 +534,10 @@
       const params = new URLSearchParams(identityQuery);
       if (takeover) params.set('takeover', '1');
       const target = `${protocol}//${location.host}/api/vnc?${params}`;
+      // The canvas replaces the polled frame; leaving the image mounted would
+      // stack a stale screenshot above the live session.
+      image.removeAttribute('src');
+      image.hidden = true;
       const connection = new RFB(screen, target, { wsProtocols: ['binary'] });
       rfb = connection;
       connection.scaleViewport = fitToWindow;
@@ -544,7 +588,7 @@
 
     document.querySelector('#refresh').onclick = refresh;
     viewButton.onclick = startViewing;
-    empty.onclick = startViewing;
+    document.querySelector('#empty-action').onclick = startViewing;
     controlButton.onclick = () => startControl(false).catch(error => toast(`Control failed: ${error.message}`));
     takeoverButton.onclick = () => startControl(true).catch(error => toast(`Takeover failed: ${error.message}`));
     releaseButton.onclick = () => { stopControl(); startViewing(); };

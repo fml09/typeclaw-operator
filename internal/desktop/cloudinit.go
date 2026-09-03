@@ -126,21 +126,29 @@ func CloudInitUserData(instance *typeclawv1alpha1.TypeClawInstance, guestToken s
 	// create ~/.config as root on the way to the entry, and an XFCE session
 	// that cannot write its own config directory comes up broken.
 	writeFile(&b, autostartPath, "root:root", "0644", autostartEntry(), false)
-	// Suppress light-locker for the desktop user.
+	// Suppress every autostart entry that can blank or lock this session.
 	//
 	// The session script turns the X screensaver and DPMS off once at session
-	// start, but xfce4-power-manager comes up afterwards, reads its own xfconf
-	// timers and re-arms blanking. When it fires, light-locker locks the seat
-	// and switches to the greeter — and the desktop account is lock_passwd, so
-	// there is no password that could unlock it. The agent keeps screenshotting
-	// and typing at a session nobody can reach, and nothing in the Instance
-	// status says why.
+	// start, and lightdm starts X with "-s 0 -dpms". Neither survives contact
+	// with the desktop environment: xfce4-power-manager and xfce4-screensaver
+	// come up afterwards and re-arm blanking from their own settings.
 	//
-	// It is deferred and user-owned on purpose. The light-locker package is
-	// installed later in the same boot, and a non-deferred write into
-	// /etc/xdg/autostart is clobbered when it lands.
-	writeFile(&b, lightLockerOverridePath(username), username+":"+username, "0644",
-		lightLockerOverride(), true)
+	// The failure this prevents is total and gives no clue. A blanker maps a
+	// full-screen override-redirect window, so wmctrl still lists the panels
+	// and every capture comes back solid black -- the guest agent's scrot and
+	// the hypervisor framebuffer alike. light-locker goes further and switches
+	// to the greeter, which no one can dismiss because the desktop account is
+	// lock_passwd. The agent goes on screenshotting and typing at a session
+	// nobody can see or reach.
+	//
+	// These are deferred, user-owned overrides. A user autostart entry shadows
+	// the system one of the same basename, and Hidden=true stops it running at
+	// all. Deferred because the packages install later in the same boot, and a
+	// non-deferred write into /etc/xdg/autostart is clobbered when they land.
+	for _, entry := range blankingAutostartEntries {
+		writeFile(&b, userAutostartPath(username, entry.file), username+":"+username, "0644",
+			hiddenAutostartEntry(entry.name), true)
+	}
 
 	// Ubuntu's lightdm package prompts for the default display manager when
 	// gdm3 is already installed; an unattended first boot would stall there.
@@ -255,18 +263,33 @@ func CloudInitNetworkData() string {
 		"    dhcp6: false\n"
 }
 
-// lightLockerOverridePath is the per-user autostart entry that shadows the
-// system-wide light-locker one. A user entry of the same basename wins over
-// /etc/xdg/autostart, which is how a desktop session is meant to be overridden.
-func lightLockerOverridePath(username string) string {
-	return "/home/" + username + "/.config/autostart/light-locker.desktop"
+// blankingAutostartEntries are the session services that blank or lock an
+// unattended desktop. Each is shadowed by a hidden user autostart entry of the
+// same basename.
+//
+// xfce4-power-manager is disabled outright rather than reconfigured. On a VM
+// with no battery it manages nothing this desktop wants, and turning off its
+// blanking through xfconf means writing a settings file whose schema is not
+// part of any contract -- a shadowed autostart entry is one mechanism for all
+// three and cannot silently stop matching.
+var blankingAutostartEntries = []struct{ file, name string }{
+	{"light-locker.desktop", "Light Locker"},
+	{"xfce4-screensaver.desktop", "Screensaver"},
+	{"xfce4-power-manager.desktop", "Power Manager"},
 }
 
-// lightLockerOverride is a hidden desktop entry: Hidden=true tells the session
+// userAutostartPath is the per-user entry that shadows the system-wide one of
+// the same basename. A user entry wins over /etc/xdg/autostart, which is how a
+// desktop session is meant to be overridden.
+func userAutostartPath(username, file string) string {
+	return "/home/" + username + "/.config/autostart/" + file
+}
+
+// hiddenAutostartEntry is a desktop entry whose Hidden=true tells the session
 // to skip the entry it shadows entirely, rather than run it and hope it exits.
-func lightLockerOverride() string {
+func hiddenAutostartEntry(name string) string {
 	return "[Desktop Entry]\n" +
 		"Type=Application\n" +
-		"Name=Light Locker\n" +
+		"Name=" + name + "\n" +
 		"Hidden=true\n"
 }
