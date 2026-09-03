@@ -48,6 +48,14 @@ func Validate(instance *typeclawv1alpha1.TypeClawInstance) error {
 		if spec.Access.Tailscale == nil || spec.Access.Tailscale.Hostname == "" {
 			return errors.New("spec.personalDesktop.access.tailscale.hostname is required when access is set")
 		}
+		// Sidecar mode has no other way to reach the tailnet. Failing here
+		// keeps the Gateway Pod from being rendered at all, which is better
+		// than rendering one whose tailscaled can never authenticate and whose
+		// console therefore never appears, with nothing saying why.
+		if ConsoleMode(spec) == ConsoleModeSidecar && spec.Access.Tailscale.AuthSecret == "" {
+			return errors.New(
+				"spec.personalDesktop.access.tailscale.authSecret is required when mode is Sidecar")
+		}
 	}
 	return nil
 }

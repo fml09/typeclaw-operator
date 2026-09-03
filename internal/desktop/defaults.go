@@ -172,3 +172,46 @@ func TailscaleAccess(spec *typeclawv1alpha1.PersonalDesktopSpec) *typeclawv1alph
 	}
 	return spec.Access.Tailscale
 }
+
+// Console exposure modes. They differ in what makes the Tailscale-User-Login
+// header trustworthy, which is the console's whole authentication story.
+const (
+	// ConsoleModeIngress publishes through the Tailscale Kubernetes operator
+	// and leans on a NetworkPolicy to keep every other Pod off the console
+	// port. Sound only where the CNI enforces NetworkPolicy.
+	ConsoleModeIngress = "Ingress"
+	// ConsoleModeSidecar runs tailscaled in the Gateway Pod and binds the
+	// console to loopback, so reachability is enforced by the network
+	// namespace rather than by a policy engine.
+	ConsoleModeSidecar = "Sidecar"
+)
+
+// ConsoleMode resolves the console exposure mode, defaulting to Ingress to
+// match the CRD default for an Instance stored before the field existed.
+func ConsoleMode(spec *typeclawv1alpha1.PersonalDesktopSpec) string {
+	access := TailscaleAccess(spec)
+	if access == nil || access.Mode == "" {
+		return ConsoleModeIngress
+	}
+	return access.Mode
+}
+
+// ConsoleSidecar reports whether the Gateway Pod carries its own tailscaled.
+// It is false when the console is not published at all, because there is then
+// no console to front.
+func ConsoleSidecar(spec *typeclawv1alpha1.PersonalDesktopSpec) bool {
+	access := TailscaleAccess(spec)
+	return access != nil && access.Hostname != "" && ConsoleMode(spec) == ConsoleModeSidecar
+}
+
+// ConsoleListenAddress is where the Gateway binds the console listener. In
+// Sidecar mode it is loopback: the tailscaled beside it shares the Pod's
+// network namespace and reaches it there, while nothing else can reach it at
+// all. In Ingress mode the Tailscale proxy is a separate Pod, so the listener
+// has to be on the Pod network and a NetworkPolicy is the only guard left.
+func ConsoleListenAddress(spec *typeclawv1alpha1.PersonalDesktopSpec) string {
+	if ConsoleSidecar(spec) {
+		return "127.0.0.1:" + itoa32(GatewayConsolePort)
+	}
+	return ":" + itoa32(GatewayConsolePort)
+}

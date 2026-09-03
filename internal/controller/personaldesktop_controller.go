@@ -464,9 +464,15 @@ func (r *PersonalDesktopReconciler) applyConsoleIngress(
 	names := desktop.Names(instance)
 	desired := desktop.ConsoleIngress(instance)
 	if desired == nil {
-		return "", r.deleteDesktopObject(ctx, &networkingv1.Ingress{
+		// No Ingress is rendered either when the console is unpublished or
+		// when tailscaled inside the Gateway Pod publishes it. Only the first
+		// of those has no address, so the URL still comes from ConsoleURL.
+		if err := r.deleteDesktopObject(ctx, &networkingv1.Ingress{
 			ObjectMeta: metav1.ObjectMeta{Name: names.ConsoleIngress, Namespace: names.Namespace},
-		})
+		}); err != nil {
+			return "", err
+		}
+		return desktop.ConsoleURL(instance, nil), nil
 	}
 
 	ingress := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: names.ConsoleIngress, Namespace: names.Namespace}}
@@ -478,7 +484,7 @@ func (r *PersonalDesktopReconciler) applyConsoleIngress(
 	}); err != nil {
 		return "", fmt.Errorf("apply console Ingress: %w", err)
 	}
-	return desktop.ConsoleURLFrom(ingress), nil
+	return desktop.ConsoleURL(instance, ingress), nil
 }
 
 // applyGateway applies the Desktop Gateway's identity, workload and Service,
@@ -526,6 +532,22 @@ func (r *PersonalDesktopReconciler) applyGateway(
 		return nil
 	}); err != nil {
 		return false, fmt.Errorf("apply gateway Service: %w", err)
+	}
+
+	// The Serve config must exist before the Deployment that mounts it, or the
+	// Pod sits in ContainerCreating waiting for a ConfigMap nobody wrote.
+	if serve := desktop.GatewayServeConfig(instance); serve != nil {
+		configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: names.ServeConfig, Namespace: names.Namespace}}
+		if err := r.applyDesktopObject(ctx, instance, configMap, func() error {
+			configMap.Data = desktop.GatewayServeConfig(instance).Data
+			return nil
+		}); err != nil {
+			return false, fmt.Errorf("apply gateway Serve config: %w", err)
+		}
+	} else if err := r.deleteDesktopObject(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: names.ServeConfig, Namespace: names.Namespace},
+	}); err != nil {
+		return false, fmt.Errorf("remove gateway Serve config: %w", err)
 	}
 
 	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: names.Gateway, Namespace: names.Namespace}}
@@ -632,6 +654,7 @@ func (r *PersonalDesktopReconciler) desktopCleanup(
 		&corev1.Secret{ObjectMeta: at(names.Namespace, names.CloudInit)},
 		&corev1.Secret{ObjectMeta: at(names.Namespace, names.Sysprep)},
 		&corev1.ConfigMap{ObjectMeta: at(names.InstanceNamespace, names.Extension)},
+		&corev1.ConfigMap{ObjectMeta: at(names.Namespace, names.ServeConfig)},
 	}
 	if desktop.CrossNamespace(instance) {
 		objects = append(objects, &corev1.Secret{ObjectMeta: at(names.InstanceNamespace, names.Tokens)})

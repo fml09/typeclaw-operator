@@ -22,6 +22,11 @@ func ConsoleIngress(instance *typeclawv1alpha1.TypeClawInstance) *networkingv1.I
 	if access == nil || access.Hostname == "" {
 		return nil
 	}
+	// Sidecar mode publishes the console from tailscaled inside the Gateway
+	// Pod, so there is no Ingress and no proxy Pod in another namespace.
+	if ConsoleSidecar(instance.Spec.PersonalDesktop) {
+		return nil
+	}
 	names := Names(instance)
 	ingressClass := TailscaleIngressClass
 
@@ -49,6 +54,24 @@ func ConsoleIngress(instance *typeclawv1alpha1.TypeClawInstance) *networkingv1.I
 		ingress.Annotations = map[string]string{TailscaleTagsAnnotation: tags}
 	}
 	return ingress
+}
+
+// ConsoleURL reports the console address for an Instance.
+//
+// In Sidecar mode it is known from the spec the moment the desktop is
+// declared: tailscaled serves the device's own MagicDNS name, so there is
+// nothing to observe and nothing to wait for. That matters beyond tidiness — a
+// console address knowable only from observed status ends up feeding the
+// Runtime's Pod template from status, and then every transition of it restarts
+// the agent outside the chart's quiesce window.
+//
+// In Ingress mode the address genuinely is an observation, because the
+// Tailscale operator names the device; the caller passes the Ingress it read.
+func ConsoleURL(instance *typeclawv1alpha1.TypeClawInstance, ingress *networkingv1.Ingress) string {
+	if ConsoleSidecar(instance.Spec.PersonalDesktop) {
+		return "https://" + TailscaleAccess(instance.Spec.PersonalDesktop).Hostname
+	}
+	return ConsoleURLFrom(ingress)
 }
 
 // ConsoleURLFrom derives the reported console address from the Ingress status

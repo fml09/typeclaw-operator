@@ -295,10 +295,46 @@ type PersonalDesktopTailscaleAccessSpec struct {
 	// +optional
 	Tags []string `json:"tags,omitempty"`
 
-	// OperatorNamespace is where Tailscale proxy Pods run; the console port is
-	// only reachable from that namespace. Default "tailscale".
+	// OperatorNamespace is where Tailscale proxy Pods run. It is meaningful
+	// only in Ingress mode, where the console NetworkPolicy admits that
+	// namespace. Default "tailscale".
 	// +kubebuilder:default=tailscale
 	OperatorNamespace string `json:"operatorNamespace,omitempty"`
+
+	// Mode selects how the console reaches the tailnet, and with it what makes
+	// the Tailscale-User-Login header trustworthy.
+	//
+	// Ingress publishes through the Tailscale Kubernetes operator. The console
+	// listener binds the Pod network, and the only thing keeping other Pods off
+	// it is a NetworkPolicy admitting OperatorNamespace. That is an honest
+	// boundary only on a cluster whose CNI enforces NetworkPolicy. On a cluster
+	// that does not — flannel, for one — the NetworkPolicy is stored and
+	// enforced by nothing, and any Pod can forge the header and take the
+	// console's exclusive input lease.
+	//
+	// Sidecar runs tailscaled in the Gateway Pod and binds the console to
+	// loopback. Tailscale Serve attaches the identity headers itself and strips
+	// client-supplied copies, and nothing outside that Pod's network namespace
+	// can reach the listener at all. The guarantee is the kernel's, not a
+	// policy engine's, so this mode is correct on every cluster. It costs one
+	// tailnet credential, named by AuthSecret.
+	// +kubebuilder:validation:Enum=Ingress;Sidecar
+	// +kubebuilder:default=Ingress
+	// +optional
+	Mode string `json:"mode,omitempty"`
+
+	// Image overrides the tailscaled image the Sidecar mode console runs.
+	// Defaults to the image the Tailscale Kubernetes operator uses for its own
+	// proxies, so one tailnet does not straddle two client versions.
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// AuthSecret names a Secret in the desktop namespace holding the tailscaled
+	// credential used in Sidecar mode: either a reusable auth key under
+	// TS_AUTHKEY, or an OAuth client under TS_CLIENT_ID and TS_CLIENT_SECRET.
+	// Required in Sidecar mode and ignored in Ingress mode.
+	// +optional
+	AuthSecret string `json:"authSecret,omitempty"`
 
 	// AllowedLogins optionally widens console access beyond owner.subject.
 	// Every entry is an exact Tailscale login name.

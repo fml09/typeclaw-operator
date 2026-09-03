@@ -57,7 +57,7 @@ The single authority that mediates every access to one Personal Desktop, for the
 _Avoid_: VNC proxy, desktop broker
 
 **Desktop Console**:
-The human owner's authenticated view of a Personal Desktop, published through an administrator-declared access provider that asserts the viewer's identity. It is never reachable without that assertion.
+The human owner's authenticated view of a Personal Desktop, published through an administrator-declared access provider that asserts the viewer's identity. It is never reachable without that assertion, and what makes the assertion unforgeable is that nothing can reach the listener except the provider itself. An identity header is only as good as that reachability guarantee.
 _Avoid_: VNC URL, noVNC page
 
 **Guest Desktop Agent**:
