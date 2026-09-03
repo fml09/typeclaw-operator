@@ -222,7 +222,16 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 				},
 			},
 		)
-		if consoleURL := desktopConsoleURL(instance); consoleURL != "" {
+		// Spec-derived, never status-derived. This Pod template must be a pure
+		// function of the Instance spec: the desktop controller writes the
+		// observed console address into status on a later poll, and if that
+		// value reached this template the status write would re-render the
+		// StatefulSet and roll the Runtime Pod — minutes after Argo reported
+		// the sync healthy, outside the chart's quiesce window, killing
+		// whatever turn the agent was in. ConsoleURL is empty in Ingress mode,
+		// where the address is only knowable by observation; the extension
+		// falls back to the address the Gateway reports to it.
+		if consoleURL := desktop.ConsoleURL(instance, nil); consoleURL != "" {
 			runtimeEnv = append(runtimeEnv, corev1.EnvVar{
 				Name: "PERSONAL_DESKTOP_CONSOLE_URL", Value: consoleURL,
 			})
@@ -339,15 +348,6 @@ func desktopProjected(instance *typeclawv1alpha1.TypeClawInstance) bool {
 	return desktop.Enabled(instance) &&
 		desktop.Validate(instance) == nil &&
 		desktop.RuntimeSupportsExtensions(instance)
-}
-
-// desktopConsoleURL is the published Desktop Console address the controller
-// observed on the console Ingress, empty until the access provider reports one.
-func desktopConsoleURL(instance *typeclawv1alpha1.TypeClawInstance) string {
-	if instance.Status.PersonalDesktop == nil {
-		return ""
-	}
-	return instance.Status.PersonalDesktop.ConsoleURL
 }
 
 // seccompProfileFor resolves the declared seccomp posture. Unset or Localhost

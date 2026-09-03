@@ -1,6 +1,7 @@
 package resources
 
 import (
+	"reflect"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -428,7 +429,6 @@ func TestStatefulSetProjectsThePersonalDesktopExtension(t *testing.T) {
 	for name, want := range map[string]string{
 		"TYPECLAW_PLATFORM_EXTENSIONS": desktop.ExtensionEntrypoint,
 		"PERSONAL_DESKTOP_GATEWAY_URL": "http://kakao-agent-desktop-gateway.typeclaw-desktops.svc:8080",
-		"PERSONAL_DESKTOP_CONSOLE_URL": "https://kakao-desktop.tailnet.ts.net",
 	} {
 		env, found := envNamed(container, name)
 		if !found || env.Value != want {
@@ -525,5 +525,59 @@ func TestStatefulSetOmitsAnUnknownConsoleURL(t *testing.T) {
 	}
 	if _, found := envNamed(sts.Spec.Template.Spec.Containers[0], "PERSONAL_DESKTOP_CONSOLE_URL"); found {
 		t.Fatalf("no console URL is known until the access provider reports one")
+	}
+}
+
+// TestRuntimePodTemplateIgnoresObservedConsoleURL pins the rule that broke the
+// agent once: the Runtime's Pod template is a pure function of the Instance
+// spec. The desktop controller learns the console address from the Tailscale
+// operator and writes it to status on a later poll; if that value reached this
+// template, the status write would re-render the StatefulSet and roll the
+// Runtime Pod minutes after the sync reported healthy, outside the chart's
+// quiesce window.
+func TestRuntimePodTemplateIgnoresObservedConsoleURL(t *testing.T) {
+	build := func(consoleURL string) corev1.Container {
+		in := instance("kakao-agent", func(in *typeclawv1alpha1.TypeClawInstance) {
+			desktopEnabled(in)
+			in.Status.PersonalDesktop = &typeclawv1alpha1.PersonalDesktopStatus{ConsoleURL: consoleURL}
+		})
+		sts, err := StatefulSet(in)
+		if err != nil {
+			t.Fatalf("StatefulSet() error: %v", err)
+		}
+		return sts.Spec.Template.Spec.Containers[0]
+	}
+
+	before := build("")
+	after := build("https://kakao-desktop.tailnet.ts.net")
+	if !reflect.DeepEqual(before.Env, after.Env) {
+		t.Fatalf("observing a console URL changed the Runtime env:\nbefore %+v\nafter  %+v", before.Env, after.Env)
+	}
+	if _, found := envNamed(after, "PERSONAL_DESKTOP_CONSOLE_URL"); found {
+		t.Fatal("PERSONAL_DESKTOP_CONSOLE_URL must not be derived from observed status")
+	}
+}
+
+// TestSidecarConsoleURLComesFromSpec is the other half: in Sidecar mode the
+// address is knowable at apply time, so the extension may have it without any
+// status ever entering the Pod template.
+func TestSidecarConsoleURLComesFromSpec(t *testing.T) {
+	in := instance("kakao-agent", func(in *typeclawv1alpha1.TypeClawInstance) {
+		desktopEnabled(in)
+		in.Spec.PersonalDesktop.Access = &typeclawv1alpha1.PersonalDesktopAccessSpec{
+			Tailscale: &typeclawv1alpha1.PersonalDesktopTailscaleAccessSpec{
+				Hostname:   "kakao-desktop",
+				Mode:       desktop.ConsoleModeSidecar,
+				AuthSecret: "tailscale-console",
+			},
+		}
+	})
+	sts, err := StatefulSet(in)
+	if err != nil {
+		t.Fatalf("StatefulSet() error: %v", err)
+	}
+	env, found := envNamed(sts.Spec.Template.Spec.Containers[0], "PERSONAL_DESKTOP_CONSOLE_URL")
+	if !found || env.Value != "https://kakao-desktop" {
+		t.Fatalf("console URL = %q (found %t), want the spec-derived MagicDNS name", env.Value, found)
 	}
 }
