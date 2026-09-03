@@ -142,27 +142,56 @@ func TestCloudInitSecretCarriesNetworkData(t *testing.T) {
 	}
 }
 
-// TestLightLockerIsSuppressed: the desktop account has no password
-// (lock_passwd), so if light-locker ever locks the seat the session is
-// unreachable by anyone, agent or owner, until the VM is power-cycled.
-func TestLightLockerIsSuppressed(t *testing.T) {
-	data := CloudInitUserData(sidecarInstance(), "guest-token")
-	path := lightLockerOverridePath(Username(sidecarInstance().Spec.PersonalDesktop))
-	if !strings.Contains(data, path) {
-		t.Fatalf("no light-locker override was written:\n%s", data)
+// TestBlankersAreSuppressed covers the failure that made a working desktop
+// look broken: a blanker maps a full-screen override-redirect window, so
+// wmctrl still lists the panels while every capture — the guest agent's scrot
+// and the hypervisor framebuffer alike — comes back solid black. light-locker
+// is worse still, switching to a greeter that nobody can dismiss because the
+// desktop account is lock_passwd.
+//
+// Asserting all three matters: suppressing only light-locker, as an earlier
+// version did, leaves xfce4-screensaver free to blank the session.
+func TestBlankersAreSuppressed(t *testing.T) {
+	in := sidecarInstance()
+	data := CloudInitUserData(in, "guest-token")
+	username := Username(in.Spec.PersonalDesktop)
+
+	// Named here rather than read from blankingAutostartEntries on purpose:
+	// a test that iterates the same list the renderer does would keep passing
+	// when an entry is dropped from it, which is precisely the regression.
+	for _, file := range []string{
+		"light-locker.desktop",
+		"xfce4-screensaver.desktop",
+		"xfce4-power-manager.desktop",
+	} {
+		path := userAutostartPath(username, file)
+		if !strings.Contains(data, path) {
+			t.Errorf("no override was written for %s", file)
+			continue
+		}
+		if !strings.HasPrefix(path, "/home/") {
+			t.Errorf("%s must live in the user's home; an /etc/xdg copy is clobbered when the package installs", file)
+		}
+		// The entry must be deferred: these packages install later in the
+		// same boot and would overwrite a non-deferred write.
+		tail := data[strings.Index(data, path):]
+		if end := strings.Index(tail, "  - path:"); end != -1 {
+			tail = tail[:end]
+		}
+		if !strings.Contains(tail, "defer: true") {
+			t.Errorf("%s must be deferred or the package install overwrites it:\n%s", file, tail)
+		}
 	}
-	if !strings.Contains(data, "/home/") {
-		t.Error("the override must live in the user's home; a /etc/xdg copy is clobbered when the package installs")
+}
+
+// TestHiddenAutostartEntryDisablesRatherThanRuns: Hidden=true is what makes the
+// session skip the shadowed entry. An entry that merely exists would still run.
+func TestHiddenAutostartEntryDisablesRatherThanRuns(t *testing.T) {
+	entry := hiddenAutostartEntry("Screensaver")
+	if !strings.Contains(entry, "Hidden=true") {
+		t.Fatalf("override does not disable anything:\n%s", entry)
 	}
-	// Locate the entry and confirm it is deferred: cloud-init installs
-	// light-locker later in the same boot.
-	idx := strings.Index(data, path)
-	tail := data[idx:]
-	end := strings.Index(tail, "  - path:")
-	if end == -1 {
-		end = len(tail)
-	}
-	if !strings.Contains(tail[:end], "defer: true") {
-		t.Fatalf("the override must be deferred or the package install overwrites it:\n%s", tail[:end])
+	if !strings.Contains(entry, "Type=Application") {
+		t.Errorf("a desktop entry without Type is ignored:\n%s", entry)
 	}
 }
