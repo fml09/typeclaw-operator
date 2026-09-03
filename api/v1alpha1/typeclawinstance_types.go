@@ -323,6 +323,20 @@ type PersonalDesktopTailscaleAccessSpec struct {
 	// +optional
 	Mode string `json:"mode,omitempty"`
 
+	// Tailnet is the tailnet's MagicDNS domain, for example
+	// "tailnet-name.ts.net". Required in Sidecar mode, where it is the only way
+	// the operator can name the console.
+	//
+	// It cannot be derived and it cannot be omitted. tailscaled serves the
+	// console under <hostname>.<tailnet> and gets a certificate for exactly
+	// that name, so a URL built from the short MagicDNS label alone fails TLS
+	// verification in a browser even though the name resolves. Ingress mode
+	// does not need this: the Tailscale operator reports the full name on the
+	// Ingress status.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$`
+	// +optional
+	Tailnet string `json:"tailnet,omitempty"`
+
 	// Image overrides the tailscaled image the Sidecar mode console runs.
 	// Defaults to the image the Tailscale Kubernetes operator uses for its own
 	// proxies, so one tailnet does not straddle two client versions.

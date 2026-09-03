@@ -69,7 +69,13 @@ func ConsoleIngress(instance *typeclawv1alpha1.TypeClawInstance) *networkingv1.I
 // Tailscale operator names the device; the caller passes the Ingress it read.
 func ConsoleURL(instance *typeclawv1alpha1.TypeClawInstance, ingress *networkingv1.Ingress) string {
 	if ConsoleSidecar(instance.Spec.PersonalDesktop) {
-		return "https://" + TailscaleAccess(instance.Spec.PersonalDesktop).Hostname
+		access := TailscaleAccess(instance.Spec.PersonalDesktop)
+		// The full MagicDNS name, never the bare label. tailscaled serves the
+		// console under <hostname>.<tailnet> and holds a certificate for that
+		// name; a URL carrying only the label resolves inside the tailnet and
+		// then fails TLS verification, which is a worse failure than no URL
+		// because it looks like a working link.
+		return "https://" + access.Hostname + "." + access.Tailnet
 	}
 	return ConsoleURLFrom(ingress)
 }
