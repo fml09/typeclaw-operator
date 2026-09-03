@@ -11,6 +11,11 @@ all: generate manifests fmt build test
 .PHONY: manifests
 manifests: ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=typeclaw-operator-manager-role $(CRD_OPTIONS) webhook paths=./api/... paths=./internal/... output:crd:artifacts:config=config/crd/bases output:rbac:artifacts:config=config/rbac
+	# Argo CD renders the chart with `helm template`, which includes crds/, so
+	# the chart's copy is what actually reaches the cluster. Leaving it to be
+	# updated by hand means a new API field is silently stripped by the API
+	# server, with no error anywhere. Copy it here so the two cannot drift.
+	cp config/crd/bases/*.yaml charts/typeclaw-operator/crds/
 
 .PHONY: generate
 generate: ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

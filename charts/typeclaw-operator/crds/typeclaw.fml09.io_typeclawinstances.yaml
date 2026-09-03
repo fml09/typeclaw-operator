@@ -393,6 +393,20 @@ spec:
                         description: Username of the autologin desktop user.
                         type: string
                     type: object
+                  macAddress:
+                    description: |-
+                      MACAddress pins the desktop interface's hardware address. Leave it unset
+                      for a desktop cloned from a golden image: KubeVirt then assigns one and
+                      the guest's first boot writes network configuration to match.
+
+                      It matters when adopting a root disk that has already booted. A Linux
+                      guest's persisted netplan matches its interface by MAC, so a disk that
+                      comes back attached to a different address finds no interface it
+                      recognizes and boots without networking. Set this to the address the
+                      disk was provisioned with, and treat it as immutable for that disk's
+                      lifetime.
+                    pattern: ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$
+                    type: string
                   namespace:
                     description: |-
                       Namespace hosting the VM, DataVolumes, Gateway, agent Service, and

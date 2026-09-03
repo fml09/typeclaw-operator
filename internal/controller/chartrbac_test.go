@@ -115,3 +115,42 @@ func difference(left, right []string) []string {
 	}
 	return only
 }
+
+// The chart's crds/ directory is what actually reaches the cluster: Argo CD
+// renders the chart with `helm template`, which includes crds/, and applies the
+// result. A generated CRD that is not copied into the chart means the API
+// server keeps an older structural schema and silently strips every field the
+// new one added — no admission error, no controller error, just a spec that
+// arrives empty. `make manifests` copies them; this test fails when someone
+// edits the generated copy without doing so.
+func TestChartCRDsMatchGeneratedCRDs(t *testing.T) {
+	const (
+		generatedCRDDir = "../../config/crd/bases"
+		chartCRDDir     = "../../charts/typeclaw-operator/crds"
+	)
+
+	generated, err := os.ReadDir(generatedCRDDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", generatedCRDDir, err)
+	}
+	if len(generated) == 0 {
+		t.Fatalf("no generated CRDs found in %s; the test would pass vacuously", generatedCRDDir)
+	}
+
+	for _, entry := range generated {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		want, err := os.ReadFile(generatedCRDDir + "/" + entry.Name())
+		if err != nil {
+			t.Fatalf("read generated %s: %v", entry.Name(), err)
+		}
+		got, err := os.ReadFile(chartCRDDir + "/" + entry.Name())
+		if err != nil {
+			t.Fatalf("%s is missing from the chart; run `make manifests`: %v", entry.Name(), err)
+		}
+		if string(got) != string(want) {
+			t.Errorf("chart CRD %s differs from the generated copy; run `make manifests`", entry.Name())
+		}
+	}
+}
