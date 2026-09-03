@@ -12,4 +12,5 @@
 /bin/
 /cover.out
 /tools-bin/
-/experiments/personal-desktop-poc/typeclaw-plugin/node_modules/
+/extensions/personal-desktop-computer-use/node_modules/
+__pycache__/

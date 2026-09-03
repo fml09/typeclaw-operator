@@ -33,6 +33,25 @@ build:
 test:
 	go test ./... -coverprofile=cover.out
 
+## The Personal Desktop feature spans three toolchains. Each gate runs on its
+## own because they fail for unrelated reasons: a Python guest regression says
+## nothing about the TypeScript extension, and CI should report them apart.
+
+.PHONY: test-guest
+test-guest: ## Run the Guest Desktop Agent test suite (hermetic; no X11 needed).
+	cd guest/desktop-agent && python3 -m unittest discover -v
+
+.PHONY: test-extension
+test-extension: ## Type-check and test the computer-use Platform Extension.
+	cd extensions/personal-desktop-computer-use && bun install --frozen-lockfile && bunx tsc --noEmit && bun test
+
+.PHONY: test-console
+test-console: ## Run the Desktop Console UI tests.
+	node --test internal/desktopgateway/static/index.test.mjs
+
+.PHONY: test-all
+test-all: test test-guest test-extension test-console
+
 .PHONY: install
 install: manifests ## Install CRDs and manager RBAC into the configured cluster.
 	kubectl apply -k config/crd
