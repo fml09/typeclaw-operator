@@ -240,3 +240,31 @@ func firstInterface(t *testing.T, vm *unstructured.Unstructured) map[string]any 
 	}
 	return iface
 }
+
+// TestVMReferencesNetworkData: rendering the networkdata key is useless unless
+// the VM actually points KubeVirt at it. Without networkDataSecretRef the
+// guest still generates its own MAC-pinned netplan.
+func TestVMReferencesNetworkData(t *testing.T) {
+	obj := VM(sidecarInstance())
+	volumes, found, err := unstructured.NestedSlice(
+		obj.Object, "spec", "template", "spec", "volumes")
+	if err != nil || !found {
+		t.Fatalf("volumes not found: %v", err)
+	}
+	for _, raw := range volumes {
+		volume, _ := raw.(map[string]any)
+		nocloud, ok := volume["cloudInitNoCloud"].(map[string]any)
+		if !ok {
+			continue
+		}
+		ref, ok := nocloud["networkDataSecretRef"].(map[string]any)
+		if !ok {
+			t.Fatalf("cloudInitNoCloud has no networkDataSecretRef: %+v", nocloud)
+		}
+		if ref["name"] != Names(sidecarInstance()).CloudInit {
+			t.Fatalf("networkDataSecretRef names %v, want the cloud-init Secret", ref["name"])
+		}
+		return
+	}
+	t.Fatal("no cloudInitNoCloud volume was rendered")
+}

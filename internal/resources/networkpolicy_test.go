@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
+	"github.com/fml09/typeclaw-operator/internal/netblocks"
 )
 
 func netInstance(mutate func(*typeclawv1alpha1.TypeClawInstance)) *typeclawv1alpha1.TypeClawInstance {
@@ -84,10 +85,10 @@ func TestNetworkPolicyDefaultsToPublicWeb(t *testing.T) {
 			if v4.CIDR != "0.0.0.0/0" {
 				t.Fatalf("v4 cidr = %q", v4.CIDR)
 			}
-			if !reflect.DeepEqual(v4.Except, netPublicWebV4Except) {
+			if !reflect.DeepEqual(v4.Except, netblocks.PublicWebV4Except) {
 				t.Fatalf("v4 except = %v, want exact special-use carve-out list", v4.Except)
 			}
-			if v6.CIDR != "::/0" || !reflect.DeepEqual(v6.Except, netPublicWebV6Except) {
+			if v6.CIDR != "::/0" || !reflect.DeepEqual(v6.Except, netblocks.PublicWebV6Except) {
 				t.Fatalf("v6 block = %s except %v", v6.CIDR, v6.Except)
 			}
 

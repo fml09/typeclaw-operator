@@ -141,26 +141,40 @@ func GatewayDeployment(instance *typeclawv1alpha1.TypeClawInstance, operatorImag
 						RunAsGroup:     int64Ptr(gatewayUID),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
-					Containers: []corev1.Container{{
-						Name:            "gateway",
-						Image:           GatewayImage(instance, operatorImage),
-						ImagePullPolicy: corev1.PullIfNotPresent,
-						Command:         []string{GatewayCommand},
-						Env:             gatewayEnv(instance, consoleURL),
-						Ports: []corev1.ContainerPort{
-							{Name: GatewayAgentPortName, ContainerPort: GatewayAgentPort, Protocol: corev1.ProtocolTCP},
-							{Name: GatewayConsolePortName, ContainerPort: GatewayConsolePort, Protocol: corev1.ProtocolTCP},
-						},
-						LivenessProbe:  gatewayProbe(),
-						ReadinessProbe: gatewayProbe(),
-						SecurityContext: &corev1.SecurityContext{
-							AllowPrivilegeEscalation: boolPtr(false),
-							ReadOnlyRootFilesystem:   boolPtr(true),
-							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-						},
-					}},
+					Volumes:    gatewayVolumes(instance),
+					Containers: gatewayContainers(instance, operatorImage, consoleURL),
 				},
 			},
+		},
+	}
+}
+
+// gatewayContainers renders the Gateway Pod's containers. In Sidecar mode a
+// tailscaled joins it, sharing the Pod's network namespace so it can reach a
+// console listener that is bound to loopback and therefore unreachable from
+// every other Pod in the cluster.
+func gatewayContainers(instance *typeclawv1alpha1.TypeClawInstance, operatorImage, consoleURL string) []corev1.Container {
+	containers := []corev1.Container{gatewayContainer(instance, operatorImage, consoleURL)}
+	if sidecar := tailscaleSidecar(instance); sidecar != nil {
+		containers = append(containers, *sidecar)
+	}
+	return containers
+}
+
+func gatewayContainer(instance *typeclawv1alpha1.TypeClawInstance, operatorImage, consoleURL string) corev1.Container {
+	return corev1.Container{
+		Name:            "gateway",
+		Image:           GatewayImage(instance, operatorImage),
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         []string{GatewayCommand},
+		Env:             gatewayEnv(instance, consoleURL),
+		Ports:           gatewayContainerPorts(instance),
+		LivenessProbe:   gatewayProbe(),
+		ReadinessProbe:  gatewayProbe(),
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: boolPtr(false),
+			ReadOnlyRootFilesystem:   boolPtr(true),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 		},
 	}
 }
@@ -182,7 +196,7 @@ func gatewayEnv(instance *typeclawv1alpha1.TypeClawInstance, consoleURL string) 
 		{Name: "OWNER_SUBJECT", Value: ownerSubject(spec)},
 		{Name: "CONSOLE_AUTH_MODE", Value: "tailscale"},
 		{Name: "LISTEN_ADDRESS", Value: ":" + itoa32(GatewayAgentPort)},
-		{Name: "CONSOLE_LISTEN_ADDRESS", Value: ":" + itoa32(GatewayConsolePort)},
+		{Name: "CONSOLE_LISTEN_ADDRESS", Value: ConsoleListenAddress(spec)},
 		{Name: "AGENT_LEASE_TTL", Value: itoa32(AgentLeaseTTLSeconds(spec)) + "s"},
 		{Name: "AGENT_TOKEN", ValueFrom: tokenRef(names.Tokens, TokenKeyAgent)},
 		{Name: "GUEST_AGENT_TOKEN", ValueFrom: tokenRef(names.Tokens, TokenKeyGuest)},
@@ -199,11 +213,30 @@ func gatewayEnv(instance *typeclawv1alpha1.TypeClawInstance, consoleURL string) 
 	return env
 }
 
-// GatewayService publishes both listeners in-cluster. They stay separate
-// ports because the NetworkPolicy admits entirely different peers to each:
-// the runtime Pod on the agent port, the Tailscale proxy on the console port.
+// GatewayService publishes the in-cluster listeners.
+//
+// In Ingress mode that is both of them, on separate ports because the
+// NetworkPolicy admits entirely different peers to each: the runtime Pod on
+// the agent port, the Tailscale proxy on the console port. In Sidecar mode the
+// console is not on the Pod network at all, so publishing a console port here
+// would route traffic to a socket that is not listening — and, worse, would
+// suggest the console is meant to be reachable from the cluster.
 func GatewayService(instance *typeclawv1alpha1.TypeClawInstance) *corev1.Service {
 	names := Names(instance)
+	ports := []corev1.ServicePort{{
+		Name:       GatewayAgentPortName,
+		Port:       GatewayAgentPort,
+		TargetPort: intstr.FromString(GatewayAgentPortName),
+		Protocol:   corev1.ProtocolTCP,
+	}}
+	if !ConsoleSidecar(instance.Spec.PersonalDesktop) {
+		ports = append(ports, corev1.ServicePort{
+			Name:       GatewayConsolePortName,
+			Port:       GatewayConsolePort,
+			TargetPort: intstr.FromString(GatewayConsolePortName),
+			Protocol:   corev1.ProtocolTCP,
+		})
+	}
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      names.Gateway,
@@ -213,20 +246,7 @@ func GatewayService(instance *typeclawv1alpha1.TypeClawInstance) *corev1.Service
 		Spec: corev1.ServiceSpec{
 			Type:     corev1.ServiceTypeClusterIP,
 			Selector: GatewayLabels(instance),
-			Ports: []corev1.ServicePort{
-				{
-					Name:       GatewayAgentPortName,
-					Port:       GatewayAgentPort,
-					TargetPort: intstr.FromString(GatewayAgentPortName),
-					Protocol:   corev1.ProtocolTCP,
-				},
-				{
-					Name:       GatewayConsolePortName,
-					Port:       GatewayConsolePort,
-					TargetPort: intstr.FromString(GatewayConsolePortName),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
+			Ports:    ports,
 		},
 	}
 }
@@ -276,3 +296,135 @@ func joinNonEmpty(values []string) string {
 func boolPtr(v bool) *bool    { return &v }
 func int64Ptr(v int64) *int64 { return &v }
 func itoa32(v int32) string   { return strconv.FormatInt(int64(v), 10) }
+
+// gatewayContainerPorts publishes the listeners that are actually on the Pod
+// network. In Sidecar mode the console is bound to loopback, so naming it as a
+// container port would advertise reachability the Pod deliberately does not
+// have.
+func gatewayContainerPorts(instance *typeclawv1alpha1.TypeClawInstance) []corev1.ContainerPort {
+	ports := []corev1.ContainerPort{
+		{Name: GatewayAgentPortName, ContainerPort: GatewayAgentPort, Protocol: corev1.ProtocolTCP},
+	}
+	if !ConsoleSidecar(instance.Spec.PersonalDesktop) {
+		ports = append(ports, corev1.ContainerPort{
+			Name: GatewayConsolePortName, ContainerPort: GatewayConsolePort, Protocol: corev1.ProtocolTCP,
+		})
+	}
+	return ports
+}
+
+// gatewayVolumes renders the volumes the tailscaled sidecar needs, and nothing
+// at all in Ingress mode. The state directory is an emptyDir rather than a
+// Kubernetes Secret on purpose: keeping tailscaled's state out of the API
+// server is what lets this sidecar exist without widening the Gateway's
+// Kubernetes credential, which ADR 0007 already records as contested. The cost
+// is that the tailnet device must be ephemeral, so it is cleaned up when the
+// Pod goes away instead of lingering and taking its MagicDNS name with it.
+func gatewayVolumes(instance *typeclawv1alpha1.TypeClawInstance) []corev1.Volume {
+	if !ConsoleSidecar(instance.Spec.PersonalDesktop) {
+		return nil
+	}
+	names := Names(instance)
+	return []corev1.Volume{
+		{
+			Name: "serve-config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: names.ServeConfig},
+				},
+			},
+		},
+		{Name: "tailscale-state", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{Name: "tailscale-tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	}
+}
+
+// tailscaleSidecar renders the tailscaled that fronts the console, or nil when
+// the console is published some other way or not at all.
+//
+// It runs in userspace networking mode, which is what lets it keep the same
+// unprivileged security context as the gateway beside it: Serve terminates
+// tailnet TLS and proxies to a local port, so nothing here needs NET_ADMIN or
+// a tun device.
+func tailscaleSidecar(instance *typeclawv1alpha1.TypeClawInstance) *corev1.Container {
+	spec := instance.Spec.PersonalDesktop
+	if !ConsoleSidecar(spec) {
+		return nil
+	}
+	access := TailscaleAccess(spec)
+
+	env := []corev1.EnvVar{
+		{Name: "TS_USERSPACE", Value: "true"},
+		{Name: "TS_HOSTNAME", Value: access.Hostname},
+		{Name: "TS_STATE_DIR", Value: TailscaleStateDir},
+		{Name: "TS_SERVE_CONFIG", Value: ServeConfigMountPath + "/" + ServeConfigKey},
+	}
+	// Both credential shapes are declared optional so one Secret may carry
+	// either a reusable auth key or an OAuth client, and the container picks
+	// whichever is present. A required reference to the shape that is absent
+	// would leave the Pod stuck in CreateContainerConfigError instead.
+	for _, key := range []string{"TS_AUTHKEY", "TS_CLIENT_ID", "TS_CLIENT_SECRET"} {
+		env = append(env, corev1.EnvVar{Name: key, ValueFrom: optionalTokenRef(access.AuthSecret, key)})
+	}
+	if tags := joinNonEmpty(access.Tags); tags != "" {
+		env = append(env, corev1.EnvVar{Name: "TS_EXTRA_ARGS", Value: "--advertise-tags=" + tags})
+	}
+
+	return &corev1.Container{
+		Name:            TailscaleSidecarName,
+		Image:           TailscaleImage(instance),
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Env:             env,
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "serve-config", MountPath: ServeConfigMountPath, ReadOnly: true},
+			{Name: "tailscale-state", MountPath: TailscaleStateDir},
+			{Name: "tailscale-tmp", MountPath: "/tmp"},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: boolPtr(false),
+			ReadOnlyRootFilesystem:   boolPtr(true),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		},
+	}
+}
+
+// GatewayServeConfig renders the tailscaled Serve configuration, or nil in
+// Ingress mode. The shape matches what the Tailscale Kubernetes operator
+// writes for its own Ingress proxies: TLS terminated on 443 for the device's
+// certificate domain, everything proxied to one backend. Here the backend is
+// loopback, which is the entire point.
+func GatewayServeConfig(instance *typeclawv1alpha1.TypeClawInstance) *corev1.ConfigMap {
+	if !ConsoleSidecar(instance.Spec.PersonalDesktop) {
+		return nil
+	}
+	names := Names(instance)
+	config := `{"TCP":{"443":{"HTTPS":true}},"Web":{"${TS_CERT_DOMAIN}:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:` +
+		itoa32(GatewayConsolePort) + `/"}}}}}`
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      names.ServeConfig,
+			Namespace: names.Namespace,
+			Labels:    Labels(instance),
+		},
+		Data: map[string]string{ServeConfigKey: config},
+	}
+}
+
+// TailscaleImage resolves the tailscaled image for the console sidecar.
+func TailscaleImage(instance *typeclawv1alpha1.TypeClawInstance) string {
+	if access := TailscaleAccess(instance.Spec.PersonalDesktop); access != nil && access.Image != "" {
+		return access.Image
+	}
+	return DefaultTailscaleImage
+}
+
+func optionalTokenRef(secretName, key string) *corev1.EnvVarSource {
+	optional := true
+	return &corev1.EnvVarSource{
+		SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+			Key:                  key,
+			Optional:             &optional,
+		},
+	}
+}

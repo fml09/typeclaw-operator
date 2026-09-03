@@ -73,6 +73,22 @@ const (
 	// ExtensionKey is the ConfigMap key holding the plugin source.
 	ExtensionKey = "index.ts"
 
+	// TailscaleSidecarName is the tailscaled container that fronts the console
+	// in Sidecar mode, and ServeConfigKey is the key holding its serve config.
+	TailscaleSidecarName = "tailscale"
+	ServeConfigKey       = "serve-config"
+	// ServeConfigMountPath is where that config is projected. TS_SERVE_CONFIG
+	// points at the file inside it.
+	ServeConfigMountPath = "/etc/tailscaled"
+	// TailscaleStateDir holds tailscaled's node state on an emptyDir, so the
+	// device is ephemeral and the Gateway needs no extra Kubernetes rights.
+	TailscaleStateDir = "/var/lib/tailscale"
+
+	// DefaultTailscaleImage is the tailscaled the console sidecar runs. It
+	// tracks the image the Tailscale Kubernetes operator uses for its own
+	// proxies, so one tailnet does not straddle two client versions.
+	DefaultTailscaleImage = "tailscale/tailscale:v1.102.2"
+
 	// TailscaleIngressClass publishes the console on the tailnet. Funnel is
 	// never enabled: it would expose the console to the public Internet and
 	// strips the identity header the console authenticates with.
@@ -107,6 +123,7 @@ type NameSet struct {
 	Gateway        string
 	ConsoleIngress string
 	Extension      string
+	ServeConfig    string
 }
 
 // Names derives every object name for one Instance. It is safe on an Instance
@@ -127,6 +144,7 @@ func Names(instance *typeclawv1alpha1.TypeClawInstance) NameSet {
 		Gateway:           desktop + "-gateway",
 		ConsoleIngress:    desktop + "-console",
 		Extension:         desktop + "-extension",
+		ServeConfig:       desktop + "-serve-config",
 	}
 	if spec := instance.Spec.PersonalDesktop; spec != nil {
 		names.GoldenVolume = spec.Image.GoldenDataVolume

@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
+	"github.com/fml09/typeclaw-operator/internal/netblocks"
 )
 
 // dnsNamespace hosts the cluster DNS workload the gateway resolves through.
@@ -42,13 +43,33 @@ func GatewayNetworkPolicy(
 		}},
 		Ports: []networkingv1.NetworkPolicyPort{tcpPort(GatewayAgentPort)},
 	}}
-	if access := TailscaleAccess(instance.Spec.PersonalDesktop); access != nil {
+	// The console rule exists only in Ingress mode. In Sidecar mode the console
+	// listener is bound to loopback, so no NetworkPolicy could admit anything
+	// to it and none is needed: the network namespace is the boundary. Writing
+	// the rule anyway would imply the console is a Pod-network surface.
+	if access := TailscaleAccess(instance.Spec.PersonalDesktop); access != nil &&
+		!ConsoleSidecar(instance.Spec.PersonalDesktop) {
 		ingress = append(ingress, networkingv1.NetworkPolicyIngressRule{
 			From: []networkingv1.NetworkPolicyPeer{{
 				NamespaceSelector: namespaceSelector(TailscaleOperatorNamespace(access)),
 				PodSelector:       &metav1.LabelSelector{MatchLabels: TailscaleProxyPodSelector(instance)},
 			}},
 			Ports: []networkingv1.NetworkPolicyPort{tcpPort(GatewayConsolePort)},
+		})
+	}
+
+	// In Sidecar mode the Gateway Pod also runs tailscaled, which has to reach
+	// the Tailscale control plane and DERP relays to bring the console up at
+	// all. Without this rule the console silently never appears on a cluster
+	// that enforces NetworkPolicy — the Pod is healthy and the tailnet device
+	// simply never registers.
+	tailscaleEgress := []networkingv1.NetworkPolicyEgressRule(nil)
+	if ConsoleSidecar(instance.Spec.PersonalDesktop) {
+		tailscaleEgress = append(tailscaleEgress, networkingv1.NetworkPolicyEgressRule{
+			To: []networkingv1.NetworkPolicyPeer{
+				{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: netblocks.PublicWebV4Except}},
+				{IPBlock: &networkingv1.IPBlock{CIDR: "::/0", Except: netblocks.PublicWebV6Except}},
+			},
 		})
 	}
 
@@ -89,6 +110,8 @@ func GatewayNetworkPolicy(
 			Ports: []networkingv1.NetworkPolicyPort{tcpPort(443)},
 		})
 	}
+
+	egress = append(egress, tailscaleEgress...)
 
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{

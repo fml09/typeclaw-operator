@@ -24,6 +24,7 @@ import (
 
 	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
 	"github.com/fml09/typeclaw-operator/internal/desktop"
+	"github.com/fml09/typeclaw-operator/internal/netblocks"
 )
 
 const (
@@ -41,30 +42,6 @@ const (
 	// policy must reach for name resolution.
 	DNSSystemNamespace = "kube-system"
 )
-
-// netPublicWebV4Except enumerates the RFC special-use and private ranges
-// carved out of the PublicWeb allow-all block so cluster, node, metadata, and
-// control-plane destinations stay unreachable from a Restricted Workload.
-var netPublicWebV4Except = []string{
-	"10.0.0.0/8",
-	"172.16.0.0/12",
-	"192.168.0.0/16",
-	"169.254.0.0/16",
-	"100.64.0.0/10",
-	"127.0.0.0/8",
-	"0.0.0.0/8",
-	"192.0.0.0/24",
-	"198.18.0.0/15",
-	"224.0.0.0/4",
-}
-
-// netPublicWebV6Except carves out loopback, unique-local, and link-local
-// ranges from the IPv6 allow-all block.
-var netPublicWebV6Except = []string{
-	"::1/128",
-	"fc00::/7",
-	"fe80::/10",
-}
 
 // NetworkPolicy renders the externally enforced traffic boundary of one
 // TypeClaw Instance. The policy always declares both Ingress and Egress
@@ -175,13 +152,13 @@ func netEgressRules(egress string, apiServerIPs ...string) []networkingv1.Networ
 					{
 						IPBlock: &networkingv1.IPBlock{
 							CIDR:   "0.0.0.0/0",
-							Except: netPublicWebV4Except,
+							Except: netblocks.PublicWebV4Except,
 						},
 					},
 					{
 						IPBlock: &networkingv1.IPBlock{
 							CIDR:   "::/0",
-							Except: netPublicWebV6Except,
+							Except: netblocks.PublicWebV6Except,
 						},
 					},
 				},

@@ -152,6 +152,11 @@ func volumes(instance *typeclawv1alpha1.TypeClawInstance) []any {
 		"name": "cloudinit",
 		"cloudInitNoCloud": map[string]any{
 			"secretRef": map[string]any{"name": names.CloudInit},
+			// One Secret carries both documents; networkDataSecretRef names it
+			// again so KubeVirt reads the networkdata key as well. Without it
+			// the guest generates a MAC-pinned netplan on first boot and loses
+			// its network on the next power-on (see CloudInitNetworkData).
+			"networkDataSecretRef": map[string]any{"name": names.CloudInit},
 		},
 	})
 }

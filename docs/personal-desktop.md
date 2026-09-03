@@ -52,9 +52,13 @@ the feature is enabled.
   root disk the operator provisions is a CDI clone of a golden DataVolume in the
   same namespace. A disk adopted through `rootVolume.existingDataVolume` is never
   cloned, so that path alone does not need a clone-capable StorageClass.
-- **The Tailscale Kubernetes operator**, if the human console is to be
-  published. The console Ingress uses `ingressClassName: tailscale` and the
-  identity the Tailscale proxy asserts.
+- **A tailnet**, if the human console is to be published. In
+  `access.tailscale.mode: Sidecar` the Gateway Pod runs its own `tailscaled` and
+  the only prerequisite is a tailnet credential. In `mode: Ingress` you also
+  need the Tailscale Kubernetes operator **and a CNI that enforces
+  NetworkPolicy** — see [Reaching the console over
+  Tailscale](#reaching-the-console-over-tailscale), where that requirement is
+  load-bearing rather than advisory.
 
 If KubeVirt or CDI is missing, the operator reports the condition
 `PersonalDesktopReady=False` with reason `KubeVirtUnavailable` and provisions
@@ -199,18 +203,28 @@ root DataVolume (a clone of the golden one), the guest bootstrap Secret
 (cloud-init on Linux, sysprep on Windows), the `VirtualMachine` with
 `runStrategy: Manual`, a ClusterIP Service for the Guest Desktop Agent, the
 Desktop Gateway Deployment with its ServiceAccount, Role, and RoleBinding, the
-Gateway Service, the console Ingress when `access` is set, and a NetworkPolicy
-around the Gateway. In the Instance namespace it adds a ConfigMap holding the
-computer-use Platform Extension and extends the Instance's own NetworkPolicy
-with egress to the Gateway.
+Gateway Service, and a NetworkPolicy around the Gateway. Publishing the console
+adds either a console Ingress (`mode: Ingress`) or a `tailscaled` sidecar and
+its Serve-config ConfigMap (`mode: Sidecar`). In the Instance namespace it adds
+a ConfigMap holding the computer-use Platform Extension and extends the
+Instance's own NetworkPolicy with egress to the Gateway.
 
 The runtime StatefulSet gains the extension mount plus the
-`TYPECLAW_PLATFORM_EXTENSIONS`, `PERSONAL_DESKTOP_GATEWAY_URL`,
-`PERSONAL_DESKTOP_AGENT_TOKEN`, and `PERSONAL_DESKTOP_CONSOLE_URL` environment
-variables. Nothing is ever written into the Agent Folder.
+`TYPECLAW_PLATFORM_EXTENSIONS`, `PERSONAL_DESKTOP_GATEWAY_URL`, and
+`PERSONAL_DESKTOP_AGENT_TOKEN` environment variables, and
+`PERSONAL_DESKTOP_CONSOLE_URL` in `mode: Sidecar`, where the address is known
+from the spec. Nothing is ever written into the Agent Folder.
+
+That last distinction is deliberate. This Pod template is a pure function of the
+Instance spec and never of observed status. An address the operator can only
+learn by watching an Ingress would, if it reached the template, re-render the
+StatefulSet the moment it was observed — restarting the agent minutes after the
+sync reported healthy and outside whatever quiesce the deploying chart arranged.
+In `mode: Ingress` the extension learns the console address from the Gateway
+instead.
 
 Setting `enabled: false`, or removing the whole block, deletes the VM, the
-Gateway, the console Ingress, and the extension mount, but keeps the root
+Gateway, the console publication, and the extension mount, but keeps the root
 DataVolume and the token Secret, so re-enabling resumes the same disk with the
 same tokens.
 
@@ -261,21 +275,59 @@ can override that installer with `windows.pythonInstaller`.
 
 ## Reaching the console over Tailscale
 
-When `access.tailscale` is set, the operator creates an Ingress with
-`ingressClassName: tailscale` pointing at the Gateway's console port. The
-Tailscale Kubernetes operator turns that into a device on your tailnet, served
-at `https://<hostname>.<tailnet>.ts.net`. Once the Ingress reports its hostname,
-the operator copies the resulting URL into
-`status.personalDesktop.consoleURL` and into the runtime's environment, so the
-agent can tell its owner where the console is.
-
-Identity comes from the `Tailscale-User-Login` header the Tailscale proxy
-injects and overwrites on every request. The Gateway accepts a console request
-only if that header equals `owner.subject`, or one of
+Identity comes from the `Tailscale-User-Login` header, which Tailscale strips
+from client requests and overwrites with the authenticated login. The Gateway
+accepts a console request only if that header equals `owner.subject`, or one of
 `access.tailscale.allowedLogins`, and only if `X-Forwarded-Proto` is `https`.
-The header is never trusted from anywhere else: a NetworkPolicy restricts the
-console port to pods in the Tailscale operator namespace
-(`access.tailscale.operatorNamespace`, default `tailscale`).
+
+That check is only as good as the guarantee that nothing else can reach the
+listener. `access.tailscale.mode` chooses what provides it, and the choice is
+not cosmetic — pick the wrong one for your cluster and the console is open to
+anything that can send an HTTP request.
+
+**`Sidecar` — correct on every cluster.** The operator runs `tailscaled` as a
+second container in the Gateway Pod and binds the console to `127.0.0.1`. No
+Ingress is created, the Service publishes no console port, and no other Pod can
+open the socket, because it is not on the Pod network at all. Tailscale Serve
+terminates tailnet TLS and attaches the identity headers. The console address is
+known from the spec, so `status.personalDesktop.consoleURL` is set immediately
+rather than after the tailnet device appears.
+
+It needs one tailnet credential, named by `access.tailscale.authSecret` — a
+Secret in the desktop namespace holding either `TS_AUTHKEY` (a reusable,
+pre-authorized, **ephemeral** key) or `TS_CLIENT_ID` and `TS_CLIENT_SECRET`. The
+key must be ephemeral: the sidecar keeps its node state on an `emptyDir` rather
+than in a Secret, deliberately, so that publishing a console does not widen the
+Gateway's Kubernetes credential. An ephemeral device is removed from the tailnet
+shortly after the Pod goes away and gives its MagicDNS name back; a
+non-ephemeral one lingers and the next Pod gets `<hostname>-1`.
+
+```sh
+kubectl -n <ns> create secret generic tailscale-console \
+  --from-literal=TS_AUTHKEY='tskey-auth-...'
+```
+
+**`Ingress` — only where the CNI enforces NetworkPolicy.** The operator creates
+an Ingress with `ingressClassName: tailscale` pointing at the Gateway's console
+port, and the Tailscale Kubernetes operator turns that into a device on your
+tailnet. The console listener is then on the Pod network, and the only thing
+keeping other Pods off it is a NetworkPolicy admitting
+`access.tailscale.operatorNamespace` (default `tailscale`).
+
+Confirm your cluster enforces NetworkPolicy before choosing this. Several common
+CNIs — flannel among them — accept NetworkPolicy objects and enforce none of
+them, and there is no error to notice: the object exists, `kubectl describe`
+shows the rule, and every Pod in the cluster can still reach the port. Any of
+them can then send the owner's login in a header and take the console's
+exclusive input lease on a desktop that is auto-logged-in with passwordless
+sudo. That includes the agent's own Runtime Pod, which would let a model reach
+the desktop through `bash` without passing the
+`security.bypass.personalDesktopControl` check.
+
+```sh
+# No output here means nothing enforces NetworkPolicy; use Sidecar mode.
+kubectl get pods -A -o name | grep -Ei 'cilium|calico|kube-router|antrea|weave'
+```
 
 Tailscale Funnel is never enabled. Funnel traffic carries no user identity, so
 the operator will not set the annotation that would expose the console to the
@@ -312,7 +364,15 @@ signed-in browser sessions.
 ## Slash commands
 
 The Platform Extension contributes one channel command to the Instance,
-available in whatever chat channel the Instance is connected to:
+available in whatever chat channel the Instance is connected to.
+
+It appears only while the feature is enabled. The command is contributed by the
+extension, the extension is loaded only when the operator injects
+`TYPECLAW_PLATFORM_EXTENSIONS`, and the operator injects that only when
+`spec.personalDesktop.enabled` is true, the spec validates, and the runtime is
+new enough to load Platform Extensions. If `/desktop` is missing from `/help`
+while `/steer` and `/queue` are present, the feature is off — those two are
+built into the runtime and are always there.
 
 - `/desktop` (aliases `/vnc`, `/pc`) — with no argument, or with `status`,
   replies with the console URL (or `Console not published`), the VM power state,
@@ -376,9 +436,14 @@ What the design does enforce:
   bearer token, compared in constant time; the console (port 8081) accepts only
   human identities. Neither accepts the other's credential.
 - **Network isolation around the Gateway.** A NetworkPolicy lets only the
-  Instance's runtime Pod reach the agent port and only the Tailscale operator
-  namespace reach the console port. The Gateway's egress is limited to DNS, the
-  API server, and the guest agent.
+  Instance's runtime Pod reach the agent port, and the Gateway's egress is
+  limited to DNS, the API server, and the guest agent (plus the public Internet
+  in `mode: Sidecar`, which `tailscaled` needs to register).
+- **A console that is not on the Pod network at all**, in
+  `access.tailscale.mode: Sidecar`. The listener is bound to `127.0.0.1` and
+  reached only by the `tailscaled` sharing its network namespace. This is the
+  one console guarantee that does not depend on the cluster enforcing
+  NetworkPolicy — see the limits below.
 - **One exclusive Input Controller.** Human and agent input are never
   concurrent, and an ownership change invalidates in-flight work rather than
   interleaving it.
@@ -390,6 +455,19 @@ What the design does enforce:
 
 What it does not do, and you should plan around:
 
+- **In `access.tailscale.mode: Ingress`, the console is only as isolated as your
+  CNI makes it.** The console listener is on the Pod network and a NetworkPolicy
+  admitting the Tailscale operator namespace is the entire boundary. A CNI that
+  does not implement NetworkPolicy — flannel, for instance — accepts that object
+  and enforces nothing, with no error and no signal anywhere: `kubectl describe`
+  shows the rule either way. Every Pod in the cluster can then reach the console
+  port and assert the owner's login in a header, which grants the exclusive
+  input lease on a desktop that is auto-logged-in with passwordless sudo. The
+  Instance's own Runtime Pod is one of those Pods, so a model with `bash` can
+  take the console without passing the extension's
+  `security.bypass.personalDesktopControl` check — the check the Platform
+  Extension is mounted outside the Agent Folder specifically to enforce. Use
+  `mode: Sidecar` unless you have confirmed your CNI enforces policy.
 - **The Gateway is a data-plane pod that does hold a Kubernetes
   service-account token.** KubeVirt VNC, screenshot, start, and stop are
   Kubernetes-authenticated subresources, so there is no way to relay a console
@@ -462,21 +540,26 @@ spec:
       existingDataVolume: pd-9f2c1a4b7de03e51ab77-root
 ```
 
-`macAddress` is the part of adoption that is easy to miss and hard to diagnose.
-A Linux guest that has already booted writes network configuration matching the
-interface it saw, by hardware address. Bring the disk back on a
-KubeVirt-assigned address and the guest finds no interface it recognizes and
-comes up with no network at all, which looks like a broken desktop rather than a
-configuration mismatch. Read the address off the PoC VM before deleting it:
+`macAddress` covers a PoC disk whose guest configured itself before the
+operator existed. The operator now renders a `networkData` document that matches
+the interface by name (`en*`) rather than by hardware address, so a desktop it
+provisioned survives any address KubeVirt assigns — including across the power
+cycles that are a desktop's normal lifecycle. A PoC disk predates that: its
+netplan was generated by cloud-init's fallback and pins the address the guest
+first saw. Bring such a disk back on a different address and the guest finds no
+interface it recognizes and comes up with no network at all, which looks like a
+broken desktop rather than a configuration mismatch. Read the address off the
+PoC VM before deleting it:
 
 ```sh
 kubectl -n <ns> get vm <poc-vm> \
   -o jsonpath='{.spec.template.spec.domain.devices.interfaces[0].macAddress}'
 ```
 
-Leave `macAddress` unset for any desktop cloned from a golden image. There the
-guest has never booted, so it writes its configuration to match whatever address
-KubeVirt assigns, and pinning one only creates a value you must never change.
+Leave `macAddress` unset for any desktop cloned from a golden image. The
+operator's `networkData` matches by interface name, so the guest needs no
+address to be stable, and pinning one only creates a value you must never
+change.
 
 With `existingDataVolume` set, the operator does not create, resize, or delete
 the root disk. `onInstanceDeletion` is ignored for an adopted volume — an
