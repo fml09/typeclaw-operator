@@ -43,21 +43,58 @@ than automatic — `rootVolume.existingDataVolume` adopts an already provisioned
 disk, including one created by the PoC, and the operator then never creates,
 resizes, or deletes it.
 
-**2. Human console identity is asserted by the Tailscale operator proxy, and
-Funnel is never enabled.** The Desktop Console trusts the `Tailscale-User-Login`
-header, which the Tailscale Kubernetes operator's proxy strips from client
-requests and overwrites with the authenticated login. That header is only
-trustworthy because nothing else can reach the listener: a NetworkPolicy admits
-the console port solely from the Tailscale operator namespace. Tailnet grants on
-the proxy's tags decide who may open a connection at all, so access control is
-expressed where the administrator already manages it instead of in a bespoke
+**2. Human console identity comes from a Tailscale identity header, and Funnel
+is never enabled.** The Desktop Console trusts `Tailscale-User-Login`, which
+Tailscale strips from client requests and overwrites with the authenticated
+login. Tailnet grants decide who may open a connection at all, so access control
+is expressed where the administrator already manages it instead of in a bespoke
 OIDC proxy per desktop. Funnel is never enabled because Funnel traffic carries
 no identity header, and enabling it would publish an authenticated desktop to
 the Internet with the identity check silently absent.
-*Cost accepted:* a hard dependency on the Tailscale Kubernetes operator, one
-identity provider in v1, and an implicit trust in that namespace — anyone who
-can run a pod there can forge the header. Administrators who do not run
-Tailscale get the agent path with no console.
+
+That header is trustworthy only if nothing else can reach the listener, and
+`spec.personalDesktop.access.tailscale.mode` selects what enforces that.
+
+`Sidecar` runs tailscaled in the Gateway Pod and binds the console to loopback.
+Nothing outside that Pod's network namespace can open the socket at all, and
+Tailscale Serve attaches the identity headers itself. The guarantee is the
+kernel's.
+
+`Ingress` publishes through the Tailscale Kubernetes operator. The console
+listener is then on the Pod network and a NetworkPolicy admitting only
+`operatorNamespace` is the sole thing keeping other Pods off it.
+
+*Cost accepted:* a hard dependency on Tailscale and one identity provider in v1.
+Administrators who do not run Tailscale get the agent path with no console.
+Sidecar mode additionally needs a tailnet credential per desktop
+(`access.tailscale.authSecret`) and makes the console device ephemeral, so a
+Gateway restart re-registers it.
+
+**2a. Amendment (2026-09-03): `Ingress` mode is unsafe on a cluster whose CNI
+does not enforce NetworkPolicy, and is no longer the mode this deployment
+uses.** The original decision above rested on a premise this repository never
+checked: that a NetworkPolicy naming the Tailscale operator namespace actually
+restricts anything. The cluster this operator runs on uses flannel as its only
+CNI, and flannel implements no NetworkPolicy — the objects are accepted by the
+API server and enforced by nothing.
+
+The consequence is not a narrowed trust boundary but an absent one. Every Pod in
+the cluster can reach the console port and set `Tailscale-User-Login` to the
+owner's login, which grants the exclusive human input lease on a desktop that is
+auto-logged-in with passwordless sudo. That includes the Runtime Pod: a model
+with the `bash` tool can take the console with `curl`, bypassing the
+`security.bypass.personalDesktopControl` permission that the out-of-Agent-Folder
+Platform Extension exists to enforce. The stated cost — "anyone who can run a
+pod there can forge the header" — understated this by one word: *there* is every
+namespace, not one.
+
+`Sidecar` mode is the fix and is what `enabled: true` uses here. `Ingress` mode
+remains available and remains correct where the CNI enforces policy; the field
+documentation says so at the point of use, because an administrator choosing a
+mode is the only person positioned to know which cluster they are on. The PoC's
+Caddy `personal-desktop-gateway-external-proxy` is not an alternative: it stamps
+a fixed subject on every request without reading the Tailscale header, and it
+listens on the Pod network, so it has the same hole one hop earlier.
 
 **3. The Desktop Gateway keeps a narrowly scoped Kubernetes credential. This
 contradicts three acceptance criteria of open ticket #18 and is recorded here
