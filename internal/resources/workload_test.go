@@ -9,6 +9,7 @@ import (
 
 	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
 	"github.com/fml09/typeclaw-operator/internal/credential"
+	"github.com/fml09/typeclaw-operator/internal/desktop"
 )
 
 func instance(name string, mutate func(*typeclawv1alpha1.TypeClawInstance)) *typeclawv1alpha1.TypeClawInstance {
@@ -387,5 +388,142 @@ func TestStatefulSetPromotedImageWinsDuringRollout(t *testing.T) {
 	}
 	if got := sts.Spec.Template.Spec.Containers[0].Image; got != "ghcr.io/fml09/typeclaw-runtime:0.49.0" {
 		t.Fatalf("active promotion must drive the rendered image, got %q", got)
+	}
+}
+
+// desktopEnabled turns on a Personal Desktop with a runtime new enough to load
+// Platform Extensions, which is what the projection is gated on.
+func desktopEnabled(in *typeclawv1alpha1.TypeClawInstance) {
+	in.Spec.Runtime.Version = typeclawv1alpha1.PersonalDesktopMinimumRuntimeVersion
+	in.Spec.PersonalDesktop = &typeclawv1alpha1.PersonalDesktopSpec{
+		Enabled: true,
+		Owner:   typeclawv1alpha1.PersonalDesktopOwnerSpec{Subject: "alice@example.com"},
+		Image:   typeclawv1alpha1.PersonalDesktopImageSpec{GoldenDataVolume: "ubuntu-golden"},
+	}
+}
+
+func envNamed(container corev1.Container, name string) (corev1.EnvVar, bool) {
+	for _, env := range container.Env {
+		if env.Name == name {
+			return env, true
+		}
+	}
+	return corev1.EnvVar{}, false
+}
+
+func TestStatefulSetProjectsThePersonalDesktopExtension(t *testing.T) {
+	in := instance("kakao-agent", func(in *typeclawv1alpha1.TypeClawInstance) {
+		desktopEnabled(in)
+		in.Spec.PersonalDesktop.Namespace = "typeclaw-desktops"
+		in.Status.PersonalDesktop = &typeclawv1alpha1.PersonalDesktopStatus{
+			ConsoleURL: "https://kakao-desktop.tailnet.ts.net",
+		}
+	})
+	sts, err := StatefulSet(in)
+	if err != nil {
+		t.Fatalf("StatefulSet() error: %v", err)
+	}
+	container := sts.Spec.Template.Spec.Containers[0]
+
+	for name, want := range map[string]string{
+		"TYPECLAW_PLATFORM_EXTENSIONS": desktop.ExtensionEntrypoint,
+		"PERSONAL_DESKTOP_GATEWAY_URL": "http://kakao-agent-desktop-gateway.typeclaw-desktops.svc:8080",
+		"PERSONAL_DESKTOP_CONSOLE_URL": "https://kakao-desktop.tailnet.ts.net",
+	} {
+		env, found := envNamed(container, name)
+		if !found || env.Value != want {
+			t.Fatalf("env %s = %q (found %t), want %q", name, env.Value, found, want)
+		}
+	}
+
+	token, found := envNamed(container, "PERSONAL_DESKTOP_AGENT_TOKEN")
+	if !found || token.ValueFrom == nil || token.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("the plugin bearer must come from a Secret, got %+v", token)
+	}
+	// A Pod can only project a Secret from its own namespace, so the
+	// reference always names the Instance-namespace mirror.
+	if token.ValueFrom.SecretKeyRef.Name != "kakao-agent-desktop-tokens" ||
+		token.ValueFrom.SecretKeyRef.Key != desktop.TokenKeyAgent {
+		t.Fatalf("secretKeyRef = %+v", token.ValueFrom.SecretKeyRef)
+	}
+
+	var mount *corev1.VolumeMount
+	for i := range container.VolumeMounts {
+		if container.VolumeMounts[i].Name == desktop.ExtensionVolumeName {
+			mount = &container.VolumeMounts[i]
+		}
+	}
+	if mount == nil {
+		t.Fatalf("the extension volume is not mounted: %+v", container.VolumeMounts)
+	}
+	// Administrator-owned and outside the Agent Folder: the model must not be
+	// able to rewrite the extension that grants it desktop control.
+	if !mount.ReadOnly || mount.MountPath != desktop.ExtensionMountPath {
+		t.Fatalf("extension mount = %+v", mount)
+	}
+
+	var volume *corev1.Volume
+	for i := range sts.Spec.Template.Spec.Volumes {
+		if sts.Spec.Template.Spec.Volumes[i].Name == desktop.ExtensionVolumeName {
+			volume = &sts.Spec.Template.Spec.Volumes[i]
+		}
+	}
+	if volume == nil || volume.ConfigMap == nil || volume.ConfigMap.Name != "kakao-agent-desktop-extension" {
+		t.Fatalf("extension volume = %+v", volume)
+	}
+}
+
+func TestStatefulSetOmitsTheDesktopProjection(t *testing.T) {
+	tests := map[string]func(*typeclawv1alpha1.TypeClawInstance){
+		"no desktop declared": func(in *typeclawv1alpha1.TypeClawInstance) {},
+		"desktop disabled": func(in *typeclawv1alpha1.TypeClawInstance) {
+			desktopEnabled(in)
+			in.Spec.PersonalDesktop.Enabled = false
+		},
+		// The desktop controller provisions nothing behind the version gate,
+		// so projecting a ConfigMap nobody creates would only leave the Pod
+		// unable to mount its own volumes.
+		"runtime predates platform extensions": func(in *typeclawv1alpha1.TypeClawInstance) {
+			desktopEnabled(in)
+			in.Spec.Runtime.Version = "0.48.9"
+		},
+		// The desktop controller reports a rejected spec and stops before it
+		// writes the token Secret or the extension ConfigMap, so projecting
+		// them would let a typo confined to the desktop block hold the whole
+		// Managed Runtime in CreateContainerConfigError.
+		"desktop spec the renderer rejects": func(in *typeclawv1alpha1.TypeClawInstance) {
+			desktopEnabled(in)
+			in.Spec.PersonalDesktop.Access = &typeclawv1alpha1.PersonalDesktopAccessSpec{}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			sts, err := StatefulSet(instance("kakao-agent", mutate))
+			if err != nil {
+				t.Fatalf("StatefulSet() error: %v", err)
+			}
+			container := sts.Spec.Template.Spec.Containers[0]
+			if _, found := envNamed(container, "TYPECLAW_PLATFORM_EXTENSIONS"); found {
+				t.Fatalf("the extension entrypoint must not be declared")
+			}
+			if _, found := envNamed(container, "PERSONAL_DESKTOP_AGENT_TOKEN"); found {
+				t.Fatalf("the plugin bearer must not be read from a Secret nobody creates")
+			}
+			for _, volume := range sts.Spec.Template.Spec.Volumes {
+				if volume.Name == desktop.ExtensionVolumeName {
+					t.Fatalf("the extension volume must not be projected")
+				}
+			}
+		})
+	}
+}
+
+func TestStatefulSetOmitsAnUnknownConsoleURL(t *testing.T) {
+	sts, err := StatefulSet(instance("kakao-agent", desktopEnabled))
+	if err != nil {
+		t.Fatalf("StatefulSet() error: %v", err)
+	}
+	if _, found := envNamed(sts.Spec.Template.Spec.Containers[0], "PERSONAL_DESKTOP_CONSOLE_URL"); found {
+		t.Fatalf("no console URL is known until the access provider reports one")
 	}
 }

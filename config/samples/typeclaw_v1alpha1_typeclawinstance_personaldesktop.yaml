@@ -1,0 +1,57 @@
+apiVersion: typeclaw.fml09.io/v1alpha1
+kind: TypeClawInstance
+metadata:
+  name: kakao-agent
+  namespace: typeclaw-system
+spec:
+  runtime:
+    # Platform Extensions — and therefore the computer-use plugin the desktop
+    # is driven with — are only loaded from 0.52.0 onward. An older release
+    # leaves the desktop provisioned and unreachable, so the operator refuses.
+    version: 0.52.0
+  storage:
+    agentFolder:
+      size: 5Gi
+    runtimeHome:
+      size: 1Gi
+  personalDesktop:
+    enabled: true
+    os: Linux
+    # KubeVirt relabels a VM's namespace to pod-security enforce=privileged,
+    # so the desktop is kept out of the Instance namespace. Everything here is
+    # cleaned up by a finalizer: owner references cannot cross namespaces.
+    namespace: typeclaw-desktops
+    owner:
+      issuer: https://login.tailscale.com
+      # The login name Tailscale asserts in Tailscale-User-Login.
+      subject: alice@example.com
+    access:
+      tailscale:
+        hostname: kakao-desktop
+        tags:
+          - tag:typeclaw-desktop
+        operatorNamespace: tailscale
+    image:
+      goldenDataVolume: ubuntu-2404-desktop-golden
+      # Imported once, then shared by every desktop cloned from it. Drop this
+      # block when an administrator seeds the golden image out of band.
+      import:
+        url: https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img
+        checksum: sha256:0000000000000000000000000000000000000000000000000000000000000000
+        size: 32Gi
+    rootVolume:
+      size: 64Gi
+      # Retain keeps the owner's disk when the Instance is deleted. Set
+      # existingDataVolume instead to adopt a disk the operator did not create;
+      # an adopted disk is never resized, replaced, or removed.
+      onInstanceDeletion: Retain
+    resources:
+      cpuCores: 4
+      memory: 8Gi
+    screen:
+      width: 1280
+      height: 800
+    linux:
+      username: desktop
+    gateway:
+      agentLeaseTTLSeconds: 120

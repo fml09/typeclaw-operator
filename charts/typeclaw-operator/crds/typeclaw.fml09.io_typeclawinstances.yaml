@@ -26,6 +26,9 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="RuntimeReady")].status
       name: Ready
       type: string
+    - jsonPath: .status.personalDesktop.phase
+      name: Desktop
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -265,6 +268,276 @@ spec:
                       type: string
                     type: array
                 type: object
+              personalDesktop:
+                description: |-
+                  PersonalDesktop provisions the Instance owner's persistent KubeVirt
+                  desktop and the computer-use Platform Extension. Unset means no desktop.
+                properties:
+                  access:
+                    description: |-
+                      Access declares how the Desktop Console is reached. Unset means the
+                      console is not exposed (agent path still works).
+                    properties:
+                      tailscale:
+                        description: |-
+                          Tailscale publishes the console through the Tailscale Kubernetes
+                          operator (an Ingress with ingressClassName tailscale). Identity comes
+                          from the Tailscale-User-Login header the operator proxy injects and
+                          overwrites.
+                        properties:
+                          allowedLogins:
+                            description: |-
+                              AllowedLogins optionally widens console access beyond owner.subject.
+                              Every entry is an exact Tailscale login name.
+                            items:
+                              type: string
+                            type: array
+                          hostname:
+                            description: Hostname is the MagicDNS label (served as
+                              <hostname>.<tailnet>.ts.net).
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          operatorNamespace:
+                            default: tailscale
+                            description: |-
+                              OperatorNamespace is where Tailscale proxy Pods run; the console port is
+                              only reachable from that namespace. Default "tailscale".
+                            type: string
+                          tags:
+                            description: |-
+                              Tags are applied to the proxy device via the tailscale.com/tags
+                              annotation (for example tag:typeclaw-desktop). Access is then granted
+                              with tailnet policy grants to that tag.
+                            items:
+                              type: string
+                            type: array
+                        required:
+                        - hostname
+                        type: object
+                    type: object
+                  enabled:
+                    description: |-
+                      Enabled turns the feature on. false (or the whole block absent) removes
+                      the VM, Gateway, console Ingress, and the extension mount, but keeps the
+                      root DataVolume and the token Secret so re-enabling resumes the same disk.
+                    type: boolean
+                  gateway:
+                    description: Gateway overrides Desktop Gateway defaults.
+                    properties:
+                      agentLeaseTTLSeconds:
+                        default: 120
+                        description: AgentLeaseTTLSeconds is the idle TTL of the agent
+                          input lease.
+                        format: int32
+                        type: integer
+                      image:
+                        description: |-
+                          Image overrides the Desktop Gateway image. Default is the operator image
+                          (the gateway binary ships in it).
+                        type: string
+                    type: object
+                  image:
+                    description: Image identifies the golden root image the desktop
+                      is cloned from.
+                    properties:
+                      goldenDataVolume:
+                        description: |-
+                          GoldenDataVolume names the sealed golden root DataVolume (in the desktop
+                          namespace) the root disk is cloned from. The operator never deletes it.
+                        minLength: 1
+                        type: string
+                      import:
+                        description: |-
+                          Import creates GoldenDataVolume from an HTTP source when it does not
+                          exist yet (Linux cloud images). Windows golden images are built by an
+                          administrator and are never imported here.
+                        properties:
+                          checksum:
+                            description: |-
+                              Checksum in CDI form, for example sha256:<hex>. An unverified import
+                              would make the desktop's whole root filesystem attacker-controlled.
+                            type: string
+                          size:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            default: 32Gi
+                            description: Size of the imported golden volume.
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          storageClassName:
+                            description: StorageClassName to request. Unset means
+                              the cluster default class.
+                            type: string
+                          url:
+                            description: URL of the cloud image. HTTPS only.
+                            type: string
+                        required:
+                        - checksum
+                        - url
+                        type: object
+                    required:
+                    - goldenDataVolume
+                    type: object
+                  linux:
+                    description: Linux holds Linux-only guest settings.
+                    properties:
+                      sshAuthorizedKeys:
+                        description: SSHAuthorizedKeys are optional test/maintenance
+                          keys for that user.
+                        items:
+                          type: string
+                        type: array
+                      username:
+                        default: desktop
+                        description: Username of the autologin desktop user.
+                        type: string
+                    type: object
+                  namespace:
+                    description: |-
+                      Namespace hosting the VM, DataVolumes, Gateway, agent Service, and
+                      console Ingress. Empty means the Instance namespace. KubeVirt relabels
+                      the VM's namespace to pod-security enforce=privileged, so administrators
+                      may prefer a dedicated namespace. Cross-namespace resources are cleaned
+                      up by a finalizer, not owner references.
+                    type: string
+                  nodeSelector:
+                    additionalProperties:
+                      type: string
+                    description: NodeSelector pins the VM (KVM-capable nodes).
+                    type: object
+                  os:
+                    default: Linux
+                    description: |-
+                      OS selects the guest template. Linux (default) uses the Ubuntu/XFCE
+                      cloud-init template; Windows uses an administrator-built, sysprepped
+                      golden image plus an unattend answer file.
+                    enum:
+                    - Linux
+                    - Windows
+                    type: string
+                  owner:
+                    description: |-
+                      Owner is the single human allowed to open the Desktop Console and the
+                      identity the desktop is bound to.
+                    properties:
+                      issuer:
+                        default: https://login.tailscale.com
+                        description: |-
+                          Issuer names the identity provider. Default https://login.tailscale.com
+                          (the only provider the console supports in v1).
+                        type: string
+                      subject:
+                        description: |-
+                          Subject is the stable identifier the console compares against the
+                          identity the access provider asserts. For Tailscale it is the login name
+                          Tailscale sends as Tailscale-User-Login (for example alice@example.com).
+                        maxLength: 512
+                        minLength: 1
+                        type: string
+                    required:
+                    - subject
+                    type: object
+                  resources:
+                    description: Resources sizes the VM.
+                    properties:
+                      cpuCores:
+                        default: 2
+                        description: CPUCores exposed to the guest.
+                        format: int32
+                        type: integer
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 4Gi
+                        description: Memory requested for the guest.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    type: object
+                  rootVolume:
+                    description: RootVolume configures the per-desktop root disk.
+                    properties:
+                      existingDataVolume:
+                        description: |-
+                          ExistingDataVolume adopts an already provisioned root DataVolume (for
+                          example a disk created by the earlier PoC). When set, the operator does
+                          not create, resize, or delete the root disk.
+                        type: string
+                      onInstanceDeletion:
+                        default: Retain
+                        description: |-
+                          OnInstanceDeletion: Retain (default) keeps the root disk when the
+                          TypeClawInstance is deleted; Delete removes it. Never applied to an
+                          adopted ExistingDataVolume.
+                        enum:
+                        - Retain
+                        - Delete
+                        type: string
+                      size:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        default: 32Gi
+                        description: Size of the cloned root disk.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      storageClassName:
+                        description: StorageClassName to request. Unset means the
+                          cluster default class.
+                        type: string
+                    type: object
+                  screen:
+                    description: Screen fixes the guest display geometry. Default
+                      1280x800.
+                    properties:
+                      height:
+                        default: 800
+                        format: int32
+                        type: integer
+                      width:
+                        default: 1280
+                        format: int32
+                        type: integer
+                    type: object
+                  windows:
+                    description: Windows holds Windows-only guest settings. Required
+                      when os=Windows.
+                    properties:
+                      pythonInstaller:
+                        description: |-
+                          PythonInstaller is downloaded by the first-logon setup script when the
+                          golden image has no Python 3. Unset means the tracked python.org
+                          release in PersonalDesktopDefaultPythonURL.
+                        properties:
+                          sha256:
+                            description: SHA256 the guest verifies before running
+                              the installer.
+                            type: string
+                          url:
+                            description: URL of the installer. HTTPS only.
+                            type: string
+                        required:
+                        - sha256
+                        - url
+                        type: object
+                      username:
+                        default: desktop
+                        description: Username of the interactive automation user created
+                          by the answer file.
+                        type: string
+                      virtioContainerDisk:
+                        default: quay.io/kubevirt/virtio-container-disk:20260902_5d403aa64a
+                        description: |-
+                          VirtioContainerDisk is the virtio-win driver/guest-tools containerDisk
+                          attached as a CD-ROM.
+                        type: string
+                    type: object
+                required:
+                - enabled
+                - image
+                - owner
+                type: object
               restartRelay:
                 description: |-
                   RestartRelay runs a same-Pod platform sidecar consuming the upstream
@@ -473,6 +746,45 @@ spec:
                   describe.
                 format: int64
                 type: integer
+              personalDesktop:
+                description: PersonalDesktop reports the observed Personal Desktop
+                  state.
+                properties:
+                  consoleURL:
+                    description: |-
+                      ConsoleURL is the published Desktop Console address, taken from the
+                      console Ingress load-balancer status.
+                    type: string
+                  desktopName:
+                    description: DesktopName is the VirtualMachine name.
+                    type: string
+                  gatewayReady:
+                    description: GatewayReady reports whether the Desktop Gateway
+                      has a ready replica.
+                    type: boolean
+                  goldenImagePhase:
+                    description: GoldenImagePhase mirrors the golden DataVolume's
+                      CDI phase.
+                    type: string
+                  message:
+                    description: Message carries human-readable provisioning context.
+                    type: string
+                  namespace:
+                    description: Namespace hosting the desktop objects.
+                    type: string
+                  phase:
+                    description: Phase is Disabled, Pending, Provisioning, Ready,
+                      Degraded, or Deleting.
+                    type: string
+                  rootVolumePhase:
+                    description: RootVolumePhase mirrors the root DataVolume's CDI
+                      phase.
+                    type: string
+                  vmPrintableStatus:
+                    description: VMPrintableStatus mirrors the VirtualMachine's printable
+                      status.
+                    type: string
+                type: object
               restoreLastProcessed:
                 description: |-
                   RestoreLastProcessed records the last value of the

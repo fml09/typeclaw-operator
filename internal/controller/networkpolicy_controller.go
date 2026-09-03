@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	typeclawv1alpha1 "github.com/fml09/typeclaw-operator/api/v1alpha1"
+	"github.com/fml09/typeclaw-operator/internal/desktop"
 	"github.com/fml09/typeclaw-operator/internal/resources"
 )
 
@@ -62,33 +63,54 @@ func (r *NetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// only for SelfConfig observation — so gate on either consumer.
 	relayEnabled := instance.Spec.RestartRelay == nil || *instance.Spec.RestartRelay
 	if relayEnabled || instance.Spec.SelfConfig != nil {
-		var eps corev1.Endpoints
-		if err := r.Get(ctx, client.ObjectKey{Name: "kubernetes", Namespace: "default"}, &eps); err == nil {
-			for _, subset := range eps.Subsets {
-				for _, addr := range subset.Addresses {
-					apiServerIPs = append(apiServerIPs, addr.IP)
-				}
-			}
-		}
-		// Egress policies match pre-DNAT destinations, so the Service's
-		// cluster IP — what DNS hands the relay — needs its own /32.
-		var svc corev1.Service
-		if err := r.Get(ctx, client.ObjectKey{Name: "kubernetes", Namespace: "default"}, &svc); err == nil && svc.Spec.ClusterIP != "" {
-			apiServerIPs = append(apiServerIPs, svc.Spec.ClusterIP)
+		apiServerIPs = discoverAPIServerIPs(ctx, r.Client)
+	}
+
+	// The runtime reaches its Personal Desktop's Gateway by Service name, and
+	// egress matches the pre-DNAT destination, so the Gateway Service's
+	// cluster IP is discovered for the same reason the API server's is.
+	gatewayIP := ""
+	if desktop.Enabled(&instance) {
+		names := desktop.Names(&instance)
+		var gateway corev1.Service
+		if err := r.Get(ctx, client.ObjectKey{Name: names.Gateway, Namespace: names.Namespace}, &gateway); err == nil {
+			gatewayIP = gateway.Spec.ClusterIP
 		}
 	}
 
-	policy := resources.NetworkPolicy(&instance, apiServerIPs...)
+	policy := resources.NetworkPolicy(&instance, apiServerIPs, gatewayIP)
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, policy, func() error {
 		// Re-derive the full desired spec so a stale live object cannot keep
 		// old ingress CIDRs or an egress universe from a previous spec.
-		desired := resources.NetworkPolicy(&instance, apiServerIPs...)
+		desired := resources.NetworkPolicy(&instance, apiServerIPs, gatewayIP)
 		policy.Spec = desired.Spec
 		return netOwn(r, &instance, policy)
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("apply NetworkPolicy: %w", err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// discoverAPIServerIPs resolves the cluster's API server destinations: the
+// backing endpoint addresses plus the "kubernetes" Service cluster IP, because
+// egress policies match the pre-DNAT destination and DNS hands callers the
+// cluster IP. Both the Instance boundary and the Desktop Gateway boundary
+// admit exactly these addresses instead of widening a whole egress universe.
+func discoverAPIServerIPs(ctx context.Context, reader client.Reader) []string {
+	var ips []string
+	var eps corev1.Endpoints
+	if err := reader.Get(ctx, client.ObjectKey{Name: "kubernetes", Namespace: "default"}, &eps); err == nil {
+		for _, subset := range eps.Subsets {
+			for _, addr := range subset.Addresses {
+				ips = append(ips, addr.IP)
+			}
+		}
+	}
+	var svc corev1.Service
+	if err := reader.Get(ctx, client.ObjectKey{Name: "kubernetes", Namespace: "default"}, &svc); err == nil && svc.Spec.ClusterIP != "" {
+		ips = append(ips, svc.Spec.ClusterIP)
+	}
+	return ips
 }
 
 // SetupWithManager sets up the NetworkPolicy controller with the Manager.

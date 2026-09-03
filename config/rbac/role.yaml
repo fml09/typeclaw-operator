@@ -7,6 +7,22 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
+  - persistentvolumeclaims
+  - secrets
+  - serviceaccounts
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - endpoints
   verbs:
   - get
@@ -22,20 +38,6 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - persistentvolumeclaims
-  - serviceaccounts
-  - services
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - pods
   verbs:
   - delete
@@ -43,14 +45,9 @@ rules:
   - list
   - watch
 - apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - get
-- apiGroups:
   - apps
   resources:
+  - deployments
   - statefulsets
   verbs:
   - create
@@ -74,8 +71,32 @@ rules:
   - update
   - watch
 - apiGroups:
+  - cdi.kubevirt.io
+  resources:
+  - datavolumes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - kubevirt.io
+  resources:
+  - virtualmachineinstances
+  - virtualmachines
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - networking.k8s.io
   resources:
+  - ingresses
   - networkpolicies
   verbs:
   - create
@@ -98,6 +119,20 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - subresources.kubevirt.io
+  resources:
+  - virtualmachineinstances/vnc
+  - virtualmachineinstances/vnc/screenshot
+  verbs:
+  - get
+- apiGroups:
+  - subresources.kubevirt.io
+  resources:
+  - virtualmachines/start
+  - virtualmachines/stop
+  verbs:
+  - update
 - apiGroups:
   - typeclaw.fml09.io
   resources:
