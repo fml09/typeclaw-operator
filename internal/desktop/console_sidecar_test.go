@@ -117,6 +117,17 @@ func TestSidecarRendersTailscaledBesideTheGateway(t *testing.T) {
 	if env["TS_HOSTNAME"].Value != "kakao-desktop" {
 		t.Errorf("TS_HOSTNAME = %q, want the spec hostname", env["TS_HOSTNAME"].Value)
 	}
+	// Observed failure, not a hypothetical: without this the container tries a
+	// Secret named "tailscale" even though TS_STATE_DIR is set, and dies with
+	// "missing get permission on secret" before tailscaled ever starts.
+	kube, declared := env["TS_KUBE_SECRET"]
+	if !declared || kube.Value != "" {
+		t.Errorf("TS_KUBE_SECRET = %q (declared %t); it must be explicitly empty so state stays on the emptyDir",
+			kube.Value, declared)
+	}
+	if env["TS_STATE_DIR"].Value != TailscaleStateDir {
+		t.Errorf("TS_STATE_DIR = %q, want %q", env["TS_STATE_DIR"].Value, TailscaleStateDir)
+	}
 	// Either credential shape may be the one the Secret carries, so both
 	// references must be optional or the Pod cannot start with only one.
 	for _, key := range []string{"TS_AUTHKEY", "TS_CLIENT_ID", "TS_CLIENT_SECRET"} {

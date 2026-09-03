@@ -357,6 +357,14 @@ func tailscaleSidecar(instance *typeclawv1alpha1.TypeClawInstance) *corev1.Conta
 		{Name: "TS_USERSPACE", Value: "true"},
 		{Name: "TS_HOSTNAME", Value: access.Hostname},
 		{Name: "TS_STATE_DIR", Value: TailscaleStateDir},
+		// Empty on purpose, and required: inside Kubernetes the container
+		// stores tailscaled's state in a Secret named "tailscale" unless this
+		// is cleared, and it does that even when TS_STATE_DIR is set. It then
+		// fails to start for want of get/update on that Secret — RBAC this
+		// Gateway deliberately does not have, because keeping tailscaled's
+		// state off the API server is what lets the console sidecar exist
+		// without widening the one Kubernetes credential in this data plane.
+		{Name: "TS_KUBE_SECRET", Value: ""},
 		{Name: "TS_SERVE_CONFIG", Value: ServeConfigMountPath + "/" + ServeConfigKey},
 	}
 	// Both credential shapes are declared optional so one Secret may carry
