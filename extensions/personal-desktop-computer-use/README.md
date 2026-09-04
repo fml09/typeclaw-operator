@@ -95,10 +95,17 @@ extension.
 
 ## The observation loop
 
-`desktop_observe` returns an adaptive JPEG as a `{type:"image", ...}` tool
-content part straight to the image-capable main model. There is no temporary
-file and no separate vision-profile call, which saves one model round trip per
-frame. A main model without image input cannot use this extension.
+`desktop_observe` defaults to saving an adaptive JPEG in runtime-private
+temporary storage and returning its absolute path. The agent must immediately
+pass that path to `look_at`; only the vision profile receives the image bytes,
+and the text-only main model receives the visual description. Observation files
+never enter the Agent Folder and are removed when the observation is
+invalidated or its session ends.
+
+An image-capable main model can request `deliver: "image"` to receive the JPEG
+as a `{type:"image", ...}` tool content part directly and save one model round
+trip. Do not use that mode with a text-only main model: it cannot forward image
+bytes it never received to `look_at`.
 
 The raw screenshot cap is at most 190,000 bytes, and the extension checks that
 the base64 expansion stays under TypeClaw's default
@@ -107,8 +114,9 @@ it to at least `4 × ceil(screenshotMaxBytes / 3)`; otherwise the cap plugin
 replaces the image with a text placeholder and the computer-use loop cannot
 work.
 
-The normal order is `desktop_acquire`, then `desktop_observe` in the next tool
-round, then exactly one `desktop_act` in the inference that received the image.
+The normal order is `desktop_acquire`, then `desktop_observe`, then `look_at`
+with the returned path, then exactly one `desktop_act` after the visual result.
+With `deliver: "image"`, the separate `look_at` step is omitted.
 A batch holds 1 to 16 actions and at most 4,000 typed characters in total — for
 example click an input, type into it, press Enter. Stop the batch before any
 target whose position cannot be read off the same screenshot, and observe again.
@@ -116,7 +124,7 @@ target whose position cannot be read off the same screenshot, and observe again.
 create a lease implicitly. `desktop_launch` needs no coordinates, so it needs
 only the lease, but its effect is still confirmed by a new observation.
 
-`desktop_observe` returns an unpredictable `observationId` alongside the image.
+`desktop_observe` returns an unpredictable `observationId` alongside the image path or image.
 `desktop_act` must echo the latest ID the model actually received, and using a
 batch invalidates the observations of every session. Do not put an observe and
 an act in the same parallel tool batch: input cannot reference an ID that the

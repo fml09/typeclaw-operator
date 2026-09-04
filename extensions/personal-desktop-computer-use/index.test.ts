@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 
 import pluginDefinition, {
   createSerializedExecutor,
@@ -641,7 +642,7 @@ describe("session-bound local control lease", () => {
 });
 
 describe("typed guest agent actions", () => {
-  test("an observation returns the image and directly unlocks one action batch", async () => {
+  test("an observation defaults to a temporary JPEG for look_at", async () => {
     const harness = await createPluginHarness();
     try {
       await acquire(harness);
@@ -650,12 +651,50 @@ describe("typed guest agent actions", () => {
         toolContext("session-a"),
       );
       const image = observed.content.find((part) => part.type === "image");
+      expect(image).toBeUndefined();
+      expect(observed.details.delivery).toBe("file");
+      expect(observed.details.imageBase64Bytes).toBeNull();
+      expect(observed.details.imagePath).toMatch(
+        /^\/.*typeclaw-personal-desktop-[0-9a-f-]+\.jpg$/,
+      );
+      const imagePath = observed.details.imagePath as string;
+      expect(new Uint8Array(await readFile(imagePath))).toEqual(
+        new Uint8Array([0xff, 0xd8, 0xff, 0xd9]),
+      );
+      expect(observed.content[0]?.text).toContain("Call look_at on that exact path now");
+
+      const result = await harness.runtime.tools.desktop_act.execute(
+        {
+          observationId: observed.details.observationId,
+          actions: [{ type: "click", x: 10, y: 20 }],
+        },
+        toolContext("session-a"),
+      );
+      expect(result.details.outcome).toBe("Applied");
+      await harness.runtime.hooks["session.end"]({ sessionId: "session-a" }, {} as never);
+      await expect(readFile(imagePath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await harness.restore();
+    }
+  });
+
+  test("an image-capable main model can request direct image delivery", async () => {
+    const harness = await createPluginHarness();
+    try {
+      await acquire(harness);
+      const observed = await harness.runtime.tools.desktop_observe.execute(
+        { deliver: "image" },
+        toolContext("session-a"),
+      );
+      const image = observed.content.find((part) => part.type === "image");
       expect(image).toEqual({
         type: "image",
         mimeType: "image/jpeg",
         data: "/9j/2Q==",
       });
-      expect(observed.details.imagePath).toBeUndefined();
+      expect(observed.details.delivery).toBe("image");
+      expect(observed.details.imagePath).toBeNull();
+      expect(observed.details.imageBase64Bytes).toBe(8);
 
       const result = await harness.runtime.tools.desktop_act.execute(
         {

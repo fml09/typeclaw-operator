@@ -7,6 +7,9 @@
 // compiles against predate `channelCommands`, which is why the exports object is
 // typed locally at the bottom of the factory.
 import { Buffer } from "node:buffer";
+import { unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { definePlugin } from "typeclaw/plugin";
 import type { PermissionService, PluginExports, PluginLogger } from "typeclaw/plugin";
@@ -167,6 +170,7 @@ type ObservedFrame = Pick<
 type ObservationState = {
   frame?: ObservedFrame;
   observationId?: string;
+  imagePath?: string;
 };
 type LocalControlLease = {
   sessionId: string;
@@ -396,6 +400,7 @@ export default definePlugin({
     let localControl: LocalControlLease | undefined;
     let disposing = false;
     const observations = new Map<string, ObservationState>();
+    const pendingFrameDeletes = new Set<Promise<void>>();
 
     const observationFor = (sessionId: string): ObservationState => {
       let observation = observations.get(sessionId);
@@ -406,9 +411,21 @@ export default definePlugin({
       return observation;
     };
 
+    const scheduleFrameDelete = (imagePath: string) => {
+      const pending = unlink(imagePath)
+        .catch((error: unknown) => {
+          if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+          ctx.logger.warn(`failed to remove Personal Desktop observation ${imagePath}: ${String(error)}`);
+        })
+        .finally(() => pendingFrameDeletes.delete(pending));
+      pendingFrameDeletes.add(pending);
+    };
+
     const invalidateObservation = (observation: ObservationState) => {
+      if (observation.imagePath) scheduleFrameDelete(observation.imagePath);
       observation.frame = undefined;
       observation.observationId = undefined;
+      observation.imagePath = undefined;
     };
 
     const invalidateAllObservations = () => {
@@ -986,6 +1003,7 @@ export default definePlugin({
           const observation = observations.get(event.sessionId);
           if (observation) invalidateObservation(observation);
           observations.delete(event.sessionId);
+          await Promise.allSettled([...pendingFrameDeletes]);
           const lease = localControl;
           if (!lease || lease.sessionId !== event.sessionId) return;
 
@@ -1084,20 +1102,23 @@ export default definePlugin({
         },
         desktop_observe: {
           description:
-            "Capture the current desktop and return a bounded JPEG directly to the image-capable main model. This observation unlocks one ordered desktop_act batch. Coordinates use the framebuffer dimensions returned here.",
-          parameters: z.object({}),
-          async execute(_args, toolCtx) {
+            'Capture the current desktop. The default `file` delivery saves a bounded JPEG in runtime-private temporary storage and returns its absolute path; immediately inspect that path with look_at before desktop_act. Use `image` only when the main model itself accepts image tool-result parts. This observation unlocks one ordered desktop_act batch. Coordinates use the framebuffer dimensions returned here.',
+          parameters: z.object({
+            deliver: z
+              .enum(["file", "image"])
+              .default("file")
+              .describe(
+                'Use "file" with a text-only main model so look_at can inspect the JPEG; use "image" only with an image-capable main model.',
+              ),
+          }),
+          fileOperands: { nonFile: ["deliver"] },
+          async execute({ deliver = "file" }, toolCtx) {
             const config = requireConfig();
             return serialized(toolCtx.signal, async (operationSignal) => {
               const frame = await fetchFrame(config, operationSignal);
               const observationId = crypto.randomUUID();
-              const imageData = Buffer.from(frame.bytes).toString("base64");
-              if (imageData.length > MAX_IMAGE_RESULT_BASE64_BYTES) {
-                throw new Error(
-                  `encoded screenshot exceeded ${MAX_IMAGE_RESULT_BASE64_BYTES} base64 bytes`,
-                );
-              }
               const observation = observationFor(toolCtx.sessionId);
+              invalidateObservation(observation);
               observation.frame = {
                 framebufferWidth: frame.framebufferWidth,
                 framebufferHeight: frame.framebufferHeight,
@@ -1106,19 +1127,61 @@ export default definePlugin({
                 controlGeneration: frame.controlGeneration,
               };
               observation.observationId = observationId;
+              let imagePath: string | undefined;
+              let imageData: string | undefined;
+              if (deliver === "file") {
+                if (!/^image\/jpeg(?:\s*;|$)/i.test(frame.mimeType)) {
+                  invalidateObservation(observation);
+                  throw new Error(`Gateway screenshot was not JPEG: ${frame.mimeType}`);
+                }
+                imagePath = join(tmpdir(), `typeclaw-personal-desktop-${observationId}.jpg`);
+                try {
+                  await writeFile(imagePath, frame.bytes, { flag: "wx", mode: 0o600 });
+                  observation.imagePath = imagePath;
+                } catch (error) {
+                  invalidateObservation(observation);
+                  throw error;
+                }
+              } else {
+                imageData = Buffer.from(frame.bytes).toString("base64");
+                if (imageData.length > MAX_IMAGE_RESULT_BASE64_BYTES) {
+                  invalidateObservation(observation);
+                  throw new Error(
+                    `encoded screenshot exceeded ${MAX_IMAGE_RESULT_BASE64_BYTES} base64 bytes`,
+                  );
+                }
+              }
               const details = {
                 framebufferWidth: frame.framebufferWidth,
                 framebufferHeight: frame.framebufferHeight,
                 encodedWidth: frame.encodedWidth,
                 encodedHeight: frame.encodedHeight,
                 encodedBytes: frame.bytes.byteLength,
-                imageBase64Bytes: imageData.length,
+                delivery: deliver,
+                imagePath: imagePath ?? null,
+                imageBase64Bytes: imageData?.length ?? null,
                 observationId,
                 gatewayBootID: frame.gatewayBootID,
                 vmiUID: frame.vmiUID,
                 controlGeneration: frame.controlGeneration,
                 warning: "A frame is an observation, not proof that a previous input took effect.",
               };
+              if (deliver === "file") {
+                return {
+                  content: [
+                    {
+                      type: "text" as const,
+                      text: [
+                        `Observation ${observationId}; screen ${frame.framebufferWidth}×${frame.framebufferHeight}; encoded ${frame.encodedWidth}×${frame.encodedHeight}.`,
+                        `The current desktop JPEG is saved at ${imagePath}.`,
+                        "Call look_at on that exact path now; do not infer screen content from window titles or this metadata, and do not call desktop_act until look_at returns.",
+                        "Interpret coordinates in the full framebuffer coordinate space, then echo this observationId in exactly one desktop_act call.",
+                      ].join(" "),
+                    },
+                  ],
+                  details,
+                };
+              }
               return {
                 content: [
                   {
@@ -1132,7 +1195,7 @@ export default definePlugin({
                   {
                     type: "image" as const,
                     mimeType: frame.mimeType,
-                    data: imageData,
+                    data: imageData!,
                   },
                 ],
                 details,
@@ -1335,7 +1398,9 @@ export default definePlugin({
         } catch (error) {
           ctx.logger.warn(`timed out draining Personal Desktop tool queue: ${String(error)}`);
         }
+        invalidateAllObservations();
         observations.clear();
+        await Promise.allSettled([...pendingFrameDeletes]);
         if (!resolvedConfig) return;
         const cleanupSignal = AbortSignal.timeout(6_000);
         try {
