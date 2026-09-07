@@ -116,8 +116,8 @@ func BackupCronJob(instance *typeclawv1alpha1.TypeClawInstance) *batchv1.CronJob
 // name, then prunes oldest archives beyond RETENTION. The excludes apply to
 // both the workspace root and nested directories.
 const backupScript = `tar czf "/snapshots/${JOB_NAME}.tar.gz" \
-  --exclude='./.env' --exclude='./secrets.json' --exclude='./auth.json' \
-  --exclude='*/.env' --exclude='*/secrets.json' --exclude='*/auth.json' \
+  --exclude='./.env' --exclude='./.env.local' --exclude='./secrets.json' --exclude='./auth.json' \
+  --exclude='*/.env' --exclude='*/.env.local' --exclude='*/secrets.json' --exclude='*/auth.json' \
   -C /workspace .
 ls -1t /snapshots/*.tar.gz | tail -n +$((RETENTION+1)) | xargs -r rm -f`
 
@@ -140,7 +140,7 @@ func RestoreJob(instance *typeclawv1alpha1.TypeClawInstance, snapshotArchive str
 
 	restorePath := shellQuote(PublicWorkspaceMountPath)
 	script := fmt.Sprintf(`[ -z "$(ls -A %s 2>/dev/null)" ] || { echo "restore aborted: public workspace target not empty (exit code 78)" >&2; exit 78; }
-tar xzf %s --exclude='./.env' --exclude='./secrets.json' --exclude='./auth.json' --exclude='*/.env' --exclude='*/secrets.json' --exclude='*/auth.json' -C %s`, restorePath, restoreArchivePath(snapshotArchive), restorePath)
+tar xzf %s --exclude='./.env' --exclude='./.env.local' --exclude='./secrets.json' --exclude='./auth.json' --exclude='*/.env' --exclude='*/.env.local' --exclude='*/secrets.json' --exclude='*/auth.json' -C %s`, restorePath, restoreArchivePath(snapshotArchive), restorePath)
 	labels := Labels(instance)
 	labels[componentLabelKey] = "restore"
 

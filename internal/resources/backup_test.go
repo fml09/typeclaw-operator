@@ -99,7 +99,7 @@ func TestBackupCronJobScriptAndMounts(t *testing.T) {
 	if !strings.Contains(script, `-C /workspace .`) {
 		t.Fatalf("script missing public workspace archive step:\n%s", script)
 	}
-	for _, excluded := range []string{".env", "secrets.json", "auth.json"} {
+	for _, excluded := range []string{".env", ".env.local", "secrets.json", "auth.json"} {
 		if !strings.Contains(script, "--exclude='./"+excluded+"'") || !strings.Contains(script, "--exclude='*/"+excluded+"'") {
 			t.Fatalf("script must exclude %s at root and nested paths:\n%s", excluded, script)
 		}
@@ -183,6 +183,11 @@ func TestRestoreJobGuardsNonEmptyTarget(t *testing.T) {
 	if !strings.Contains(script, `tar xzf '/snapshots/kakao-agent-backup-12345.tar.gz'`) ||
 		!strings.Contains(script, `-C '/workspace'`) {
 		t.Fatalf("script missing unpack of requested public workspace archive:\n%s", script)
+	}
+	for _, excluded := range []string{".env", ".env.local", "secrets.json", "auth.json"} {
+		if !strings.Contains(script, "--exclude='./"+excluded+"'") || !strings.Contains(script, "--exclude='*/"+excluded+"'") {
+			t.Fatalf("restore must exclude %s at root and nested paths:\n%s", excluded, script)
+		}
 	}
 	var workspace corev1.VolumeMount
 	found := false
