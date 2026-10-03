@@ -26,6 +26,36 @@ Deploy a sample TypeClaw Instance:
 kubectl apply -f config/samples/typeclaw_v1alpha1_typeclawinstance.yaml
 ```
 
+## Temporary storage
+
+Set `spec.storage.tmpSizeLimit` on each TypeClaw Instance to change the
+memory-backed `/tmp` limit. An Instance Helm chart can expose this field as
+`storage.tmpSizeLimit` and render it into the Instance spec, for example:
+
+```yaml
+spec:
+  storage:
+    agentFolder:
+      size: 10Gi
+    tmpSizeLimit: 4Gi
+```
+
+The default remains `256Mi` when omitted. Positive Kubernetes quantities such
+as `4Gi` and `8Gi` are supported. This changes ephemeral `/tmp` capacity;
+`agentFolder.size` provisions durable storage at `/agent`. `/tmp` contents
+are cleared when the Pod is replaced. Files in this memory-backed volume count
+toward container memory usage, so budget runtime memory and node capacity for
+the expected temporary files. The limit is a ceiling, not a memory reservation.
+
+When upgrading the operator, apply the updated CRD before setting the new
+field. Helm does not update existing CRDs from a chart's `crds/` directory:
+
+```sh
+kubectl apply -f config/crd/bases
+helm upgrade --install typeclaw-operator charts/typeclaw-operator \
+  --namespace typeclaw-system
+```
+
 ## Personal Desktop
 
 A TypeClaw Instance can own a **Personal Desktop**: a persistent KubeVirt

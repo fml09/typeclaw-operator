@@ -2,6 +2,7 @@ package resources
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -251,6 +252,79 @@ func TestStatefulSetVolumesAndMounts(t *testing.T) {
 	if shmVol.EmptyDir == nil || shmVol.EmptyDir.SizeLimit.Cmp(resource.MustParse("512Mi")) != 0 {
 		t.Errorf("browser shared memory must stay at 512Mi limit, got %+v", shmVol)
 	}
+}
+
+func TestStatefulSetTmpSizeLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name, configured, want string
+		invalid                bool
+	}{
+		{name: "omitted keeps existing default", want: "256Mi"},
+		{name: "four GiB", configured: "4Gi", want: "4Gi"},
+		{name: "eight GiB", configured: "8Gi", want: "8Gi"},
+		{name: "explicit zero", configured: "0", invalid: true},
+		{name: "negative capacity", configured: "-1Gi", invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := instance("reviewer", nil)
+			if tc.configured != "" {
+				limit := resource.MustParse(tc.configured)
+				in.Spec.Storage.TmpSizeLimit = &limit
+			}
+			sts, err := StatefulSet(in)
+			if tc.invalid {
+				if err == nil || !strings.Contains(err.Error(), "spec.storage.tmpSizeLimit must be positive") || sts != nil {
+					t.Fatalf("invalid capacity must name the offending field without rendering a workload: sts=%v err=%v", sts, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("StatefulSet() error: %v", err)
+			}
+			for _, volume := range sts.Spec.Template.Spec.Volumes {
+				if volume.Name != "runtime-tmp" {
+					continue
+				}
+				if volume.EmptyDir == nil || volume.EmptyDir.Medium != corev1.StorageMediumMemory || volume.EmptyDir.SizeLimit == nil {
+					t.Fatalf("/tmp must remain a sized memory-backed emptyDir: %+v", volume)
+				}
+				if got := volume.EmptyDir.SizeLimit; got.Cmp(resource.MustParse(tc.want)) != 0 {
+					t.Errorf("/tmp capacity = %s, want %s", got.String(), tc.want)
+				}
+				return
+			}
+			t.Fatal("runtime-tmp volume missing")
+		})
+	}
+}
+
+func TestTmpSizeLimitCopiesDoNotMutateInstance(t *testing.T) {
+	// A decimal quantity exercises the internally shared representation that
+	// an ordinary struct copy would leave aliased.
+	limit := resource.MustParse("4.000000001Gi")
+	in := instance("reviewer", nil)
+	in.Spec.Storage.TmpSizeLimit = &limit
+
+	copy := in.DeepCopy()
+	copy.Spec.Storage.TmpSizeLimit.Add(resource.MustParse("1Gi"))
+	if limit.Cmp(resource.MustParse("4.000000001Gi")) != 0 {
+		t.Fatalf("Instance deep copy mutated original tmpSizeLimit: %s", limit.String())
+	}
+
+	sts, err := StatefulSet(in)
+	if err != nil {
+		t.Fatalf("StatefulSet() error: %v", err)
+	}
+	for _, volume := range sts.Spec.Template.Spec.Volumes {
+		if volume.Name == "runtime-tmp" {
+			volume.EmptyDir.SizeLimit.Add(resource.MustParse("1Gi"))
+			if limit.Cmp(resource.MustParse("4.000000001Gi")) != 0 {
+				t.Fatalf("rendered volume mutated original tmpSizeLimit: %s", limit.String())
+			}
+			return
+		}
+	}
+	t.Fatal("runtime-tmp volume missing")
 }
 
 func TestStatefulSetSuspendScalesToZero(t *testing.T) {

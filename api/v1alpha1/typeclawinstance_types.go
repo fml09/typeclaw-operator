@@ -72,8 +72,9 @@ type VolumeClaimSpec struct {
 	StorageClassName *string `json:"storageClassName,omitempty"`
 }
 
-// StorageSpec owns the durable volumes of a TypeClaw Instance. Credential
-// bytes for Opaque Credential Use are never sourced from these volumes.
+// StorageSpec owns durable volumes and runtime scratch storage of a TypeClaw
+// Instance. Credential bytes for Opaque Credential Use are never sourced from
+// these volumes.
 type StorageSpec struct {
 	// AgentFolder provisions the PVC carrying authored configuration, Git
 	// history, sessions, memory, and the public workspace. Kubernetes Secret
@@ -86,6 +87,14 @@ type StorageSpec struct {
 	// operations use an out-of-process Credential Runner instead.
 	// +optional
 	RuntimeHome *VolumeClaimSpec `json:"runtimeHome,omitempty"`
+
+	// TmpSizeLimit caps the memory-backed emptyDir mounted at /tmp. Usage
+	// counts toward container memory; capacity is not reserved in advance.
+	// Unset means 256Mi. Explicit values must be positive.
+	// +kubebuilder:default="256Mi"
+	// +kubebuilder:validation:XValidation:rule="isQuantity(string(self)) && quantity(string(self)).isGreaterThan(quantity('0'))",message="tmpSizeLimit must be a positive Kubernetes quantity"
+	// +optional
+	TmpSizeLimit *resource.Quantity `json:"tmpSizeLimit,omitempty"`
 
 	// OnInstanceDeletion decides what happens to the Instance's persistent
 	// volumes when the TypeClawInstance is deleted. Retain (default) keeps
@@ -525,7 +534,7 @@ type TypeClawInstanceSpec struct {
 	// +optional
 	Runtime RuntimeSpec `json:"runtime,omitempty"`
 
-	// Storage owns the durable volumes.
+	// Storage owns durable volumes and runtime scratch storage.
 	// +optional
 	Storage StorageSpec `json:"storage,omitempty"`
 

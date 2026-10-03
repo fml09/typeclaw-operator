@@ -663,7 +663,7 @@ spec:
                     type: array
                 type: object
               storage:
-                description: Storage owns the durable volumes.
+                description: Storage owns durable volumes and runtime scratch storage.
                 properties:
                   agentFolder:
                     default:
@@ -719,6 +719,20 @@ spec:
                     required:
                     - size
                     type: object
+                  tmpSizeLimit:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    default: 256Mi
+                    description: |-
+                      TmpSizeLimit caps the memory-backed emptyDir mounted at /tmp. Usage
+                      counts toward container memory; capacity is not reserved in advance.
+                      Unset means 256Mi. Explicit values must be positive.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                    x-kubernetes-validations:
+                    - message: tmpSizeLimit must be a positive Kubernetes quantity
+                      rule: isQuantity(string(self)) && quantity(string(self)).isGreaterThan(quantity('0'))
                 required:
                 - agentFolder
                 type: object

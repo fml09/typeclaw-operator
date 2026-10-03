@@ -66,9 +66,9 @@ const (
 	// to the chart appVersion so sidecar and manager upgrade together.
 	DefaultOperatorImage = "ghcr.io/fml09/typeclaw-operator:0.1.1"
 
-	gracePeriodSeconds = 120
-	tmpMemorySize      = "256Mi"
-	shmMemorySize      = "512Mi"
+	gracePeriodSeconds   = 120
+	defaultTmpMemorySize = "256Mi"
+	shmMemorySize        = "512Mi"
 )
 
 // Labels returns the immutable selector labels for an Instance workload.
@@ -119,6 +119,13 @@ func claimTemplate(name string, spec typeclawv1alpha1.VolumeClaimSpec) corev1.Pe
 // establish stays an open item under operator issue #7 rather than being
 // solved with privilege here.
 func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulSet, error) {
+	tmpSize := resource.MustParse(defaultTmpMemorySize)
+	if configured := instance.Spec.Storage.TmpSizeLimit; configured != nil {
+		if configured.Sign() <= 0 {
+			return nil, fmt.Errorf("spec.storage.tmpSizeLimit must be positive, got %s", configured.String())
+		}
+		tmpSize = configured.DeepCopy()
+	}
 	labels := Labels(instance)
 
 	claims := []corev1.PersistentVolumeClaim{
@@ -137,7 +144,7 @@ func StatefulSet(instance *typeclawv1alpha1.TypeClawInstance) (*appsv1.StatefulS
 			Name: "runtime-tmp",
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
 				Medium:    corev1.StorageMediumMemory,
-				SizeLimit: resource.NewQuantity(mustParseBytes(tmpMemorySize), resource.BinarySI),
+				SizeLimit: &tmpSize,
 			}},
 		},
 		{
